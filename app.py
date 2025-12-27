@@ -38,7 +38,7 @@ def update_history(ticker, score, price):
 # ==========================================
 
 # Default Key (You can change this in the Sidebar)
-DEFAULT_KEY = "O1U1GWC8OQ4RRBL1" 
+DEFAULT_KEY = "GLN6L0BRQIEN59OL" 
 
 @st.cache_data(ttl=300)
 def get_alpha_data(ticker, api_key):
