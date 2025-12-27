@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 import plotly.express as px
-import numpy as np
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -11,7 +10,7 @@ from datetime import datetime, timedelta
 # ==========================================
 st.set_page_config(page_title="Market Sector & Stock Analyzer", layout="wide")
 
-# SECURITY: Get API Key from Streamlit Secrets (Invisible to public)
+# SECURITY: Get API Key from Streamlit Secrets
 try:
     API_KEY = st.secrets["FMP_KEY"]
 except:
@@ -44,19 +43,22 @@ if 'trade_log' not in st.session_state:
     st.session_state['trade_log'] = []
 
 # ==========================================
-# 2. DATA FETCHING FUNCTIONS (Cached)
+# 2. DATA FETCHING FUNCTIONS (UPDATED)
 # ==========================================
 
 @st.cache_data(ttl=3600*24)
 def get_daily_price_history(ticker):
-    url = f"{BASE_URL}/historical-price-full/{ticker}?from=2015-01-01&apikey={API_KEY}"
+    # UPDATED: Using 'historical-chart/1day' instead of 'historical-price-full'
+    url = f"{BASE_URL}/historical-chart/1day/{ticker}?apikey={API_KEY}"
     try:
         data = requests.get(url).json()
-        if 'historical' in data:
-            df = pd.DataFrame(data['historical'])
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date').set_index('date')
-            return df['adjClose']
+        if isinstance(data, list) and len(data) > 0:
+            df = pd.DataFrame(data)
+            # Ensure we have date and close
+            if 'date' in df.columns and 'close' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.sort_values('date').set_index('date')
+                return df['close'] # Use close instead of adjClose for this endpoint
         return None
     except: return None
 
@@ -108,7 +110,7 @@ def get_full_data_merged(ticker):
     return df
 
 # ==========================================
-# 3. HELPER LOGIC: SCORING & AGGREGATION
+# 3. SCORING LOGIC (UNCHANGED)
 # ==========================================
 
 def calculate_score(row):
@@ -143,7 +145,7 @@ def calculate_score(row):
     return score
 
 # ==========================================
-# 4. APP UI
+# 4. APP UI (UNCHANGED)
 # ==========================================
 
 st.title("📈 Strategic Market & Stock Analyzer")
