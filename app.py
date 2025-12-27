@@ -2,15 +2,14 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
-import numpy as np
 from datetime import datetime, timedelta
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Market Analyzer v4.0 (Smart Scoring)", layout="wide")
+st.set_page_config(page_title="Market Analyzer v4.1 (Fixed Math)", layout="wide")
 
-# Default Sector Definitions
+# Default Sector Definitions (Same as before)
 DEFAULT_SECTORS = {
     "Tech": ["VGT", "NVDA", "AAPL", "MSFT", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "CSCO", "ACN", "TXN", "IBM"],
     "Healthcare": ["XLV", "LLY", "UNH", "JNJ", "ABBV", "MRK", "TMO", "ABT", "AMGN", "PFE"],
@@ -45,14 +44,13 @@ def get_stock_data(ticker):
         return None, None
 
 def safe_float(val):
-    """Converts value to float, returns None if invalid"""
     try:
         if val is None or val == "None": return None
         return float(val)
     except: return None
 
 # ==========================================
-# 3. SMART SCORING LOGIC
+# 3. SMART SCORING LOGIC (FIXED)
 # ==========================================
 
 def calculate_smart_score(info):
@@ -94,29 +92,35 @@ def calculate_smart_score(info):
         earned_points += pts
         metrics_log["PEG Ratio"] = f"{peg:.2f} ({pts}/25)"
     else:
-        # Fallback: Try to calculate PEG manually if P/E and Growth exist
         metrics_log["PEG Ratio"] = "N/A (Excluded)"
 
-    # --- 4. ROIC (Weight: 30) ---
-    # Try Manual Calculation: NOPAT / Invested Capital
-    # NOPAT approx = (Revenue * Op Margin) * (1 - 0.21 Tax)
-    # Invested Capital approx = Total Equity + Total Debt
+    # --- 4. ROIC (Weight: 30) - CRITICAL FIX ---
     roic = None
     try:
         rev = safe_float(info.get('totalRevenue'))
         margin = safe_float(info.get('operatingMargins'))
-        equity = safe_float(info.get('totalStockholderEquity')) or safe_float(info.get('bookValue'))
+        
+        # FIX: Ensure we have Total Equity, not Per Share
+        equity = safe_float(info.get('totalStockholderEquity'))
+        if equity is None:
+            # Fallback: Book Value Per Share * Shares Outstanding
+            bv = safe_float(info.get('bookValue'))
+            shares = safe_float(info.get('sharesOutstanding'))
+            if bv and shares:
+                equity = bv * shares
+        
         debt = safe_float(info.get('totalDebt'))
         
         if rev and margin and equity:
             op_income = rev * margin
-            nopat = op_income * 0.79 # Assuming 21% Tax
+            nopat = op_income * 0.79 # 21% Tax Assumption
             invested_capital = equity + (debt if debt else 0)
+            
             if invested_capital > 0:
                 roic = (nopat / invested_capital) * 100
     except: pass
     
-    # If Manual calc failed, try ROE as last resort fallback, but label it
+    # Fallback to ROE if ROIC fails
     is_proxy = False
     if roic is None:
         roic = safe_float(info.get('returnOnEquity'))
@@ -125,11 +129,15 @@ def calculate_smart_score(info):
             is_proxy = True
 
     if roic is not None:
+        # Cap ROIC at 100% to prevent display glitches
+        if roic > 100 and not is_proxy: roic = 100
+        
         total_possible += 30
         pts = 0
         if roic > 20: pts = 30
         elif 10 <= roic <= 20: pts = 15
         earned_points += pts
+        
         label = "ROE (Proxy)" if is_proxy else "ROIC (Calc)"
         metrics_log[label] = f"{roic:.1f}% ({pts}/30)"
     else:
@@ -150,7 +158,7 @@ def calculate_smart_score(info):
     else:
         metrics_log["FCF Yield"] = "N/A (Excluded)"
 
-    # --- FINAL SCORE NORMALIZATION ---
+    # --- FINAL SCORE ---
     if total_possible > 0:
         final_score = (earned_points / total_possible) * 100
     else:
@@ -162,49 +170,41 @@ def calculate_smart_score(info):
 # 4. APP UI
 # ==========================================
 
-st.title("🧠 Market Analyzer v4.0 (Smart Scoring)")
+st.title("🧠 Market Analyzer v4.1 (Math Fix)")
 st.markdown("---")
 
 page = st.sidebar.radio("Navigate", ["Individual Stock Analyzer", "Sector Trends", "Trade Tester"])
 
 if page == "Individual Stock Analyzer":
     st.header("Individual Stock Scoring")
-    ticker = st.text_input("Enter Ticker", "MRK").upper()
+    ticker = st.text_input("Enter Ticker", "NVDA").upper()
     
     if ticker:
-        with st.spinner(f"Fetching deep data for {ticker}..."):
+        with st.spinner(f"Fetching data for {ticker}..."):
             hist, info = get_stock_data(ticker)
             
             if info and len(hist) > 0:
-                # Calculate Score
                 score, breakdown = calculate_smart_score(info)
                 
                 col_score, col_chart = st.columns([1, 2])
-                
                 with col_score:
                     st.metric("Quality Score", f"{score}/100")
                     st.write("### Scorecard")
-                    # Display breakdown in a clean table
-                    score_df = pd.DataFrame(list(breakdown.items()), columns=["Metric", "Value"])
-                    st.table(score_df)
+                    st.table(pd.DataFrame(list(breakdown.items()), columns=["Metric", "Value"]))
                 
                 with col_chart:
-                    st.subheader(f"{ticker} Price Action")
+                    st.subheader("Price Action")
                     st.line_chart(hist['Close'])
-                    
-                    # Extra Info
-                    curr_price = hist['Close'].iloc[-1]
-                    st.info(f"Current Price: ${curr_price:.2f}")
-
+                    st.caption(f"Current Price: ${hist['Close'].iloc[-1]:.2f}")
             else:
-                st.error("Ticker not found or API error.")
+                st.error("Ticker not found.")
 
 elif page == "Sector Trends":
     st.header("Sector Dashboard")
     sector_name = st.selectbox("Select Sector", list(st.session_state['sectors'].keys()))
     tickers = st.session_state['sectors'][sector_name]
     
-    if st.button("Analyze Sector Breadth"):
+    if st.button("Analyze Sector"):
         with st.spinner("Analyzing..."):
             above_sma = 0
             total_stocks = 0
@@ -217,8 +217,6 @@ elif page == "Sector Trends":
                     curr = hist['Close'].iloc[-1]
                     if curr > sma50: above_sma += 1
                     total_stocks += 1
-                    
-                    # Normalize
                     norm = (hist['Close'] / hist['Close'].iloc[0] - 1) * 100
                     fig.add_trace(go.Scatter(x=hist.index, y=norm, name=t))
             
@@ -237,16 +235,11 @@ elif page == "Trade Tester":
         hist, _ = get_stock_data(t_ticker)
         if hist is not None:
             try:
-                # Timezone naive fix
                 hist.index = hist.index.tz_localize(None)
-                search_date = pd.Timestamp(t_date)
-                idx = hist.index.get_indexer([search_date], method='nearest')[0]
-                
-                buy_price = hist.iloc[idx]['Close']
-                curr_price = hist.iloc[-1]['Close']
-                ret = ((curr_price - buy_price)/buy_price)*100
-                
-                st.success(f"Trade Result: {t_ticker}")
-                st.metric("Total Return", f"{ret:.2f}%")
-                st.write(f"Bought: ${buy_price:.2f} | Now: ${curr_price:.2f}")
+                idx = hist.index.get_indexer([pd.Timestamp(t_date)], method='nearest')[0]
+                buy = hist.iloc[idx]['Close']
+                curr = hist.iloc[-1]['Close']
+                ret = ((curr - buy)/buy)*100
+                st.success(f"Result: {ret:.2f}%")
+                st.write(f"Bought: ${buy:.2f} | Now: ${curr:.2f}")
             except: st.error("Date error")
