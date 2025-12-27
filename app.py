@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Market Analyzer v6.1 (Pro Data)", layout="wide")
+st.set_page_config(page_title="Market Analyzer v6.2 (Mega-Cap Safe)", layout="wide")
 
 DEFAULT_SECTORS = {
     "Tech": ["NVDA", "AAPL", "MSFT", "AVGO", "ORCL"],
@@ -22,7 +22,6 @@ if 'sectors' not in st.session_state:
 # 2. DATA ENGINES
 # ==========================================
 
-# --- ENGINE A: YAHOO (For Charts - Fast & Free) ---
 @st.cache_data(ttl=900)
 def get_chart_data(ticker):
     try:
@@ -31,21 +30,14 @@ def get_chart_data(ticker):
         return hist
     except: return None
 
-# --- ENGINE B: ALPHA VANTAGE (For Accurate Ratios) ---
 @st.cache_data(ttl=3600*24)
 def get_alpha_fundamentals(ticker, api_key):
-    # This URL pulls the "Company Overview" which has pre-calculated P/E, PEG, etc.
     url_overview = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}"
-    
     try:
         r = requests.get(url_overview)
         data = r.json()
-        
-        # Error Handling
-        if "Note" in data: return None, "⚠️ API Limit Reached (25 calls/day max)."
-        if "Information" in data: return None, "⚠️ Daily Limit Exceeded."
-        if not data: return None, "Ticker not found in Alpha Vantage."
-            
+        if "Note" in data: return None, "⚠️ API Limit Reached."
+        if not data: return None, "Ticker not found."
         return data, None
     except Exception as e:
         return None, str(e)
@@ -57,7 +49,7 @@ def safe_float(val):
     except: return None
 
 # ==========================================
-# 3. SCORING LOGIC (Using Professional Data)
+# 3. SCORING LOGIC (Fixed for Apple ROE)
 # ==========================================
 
 def calculate_hybrid_score(av_data):
@@ -98,11 +90,16 @@ def calculate_hybrid_score(av_data):
         log["PEG Ratio"] = f"{peg:.2f} ({pts}/25)"
     else: log["PEG Ratio"] = "N/A"
     
-    # 4. ROE (Weight: 30) - Using ReturnOnEquityTTM as Quality Proxy
+    # 4. ROE (Weight: 30) - THE FIX
     roe = safe_float(av_data.get('ReturnOnEquityTTM'))
     if roe:
-        # AlphaVantage handles the math, so we just check the value
-        roe = roe * 100 if roe < 1 else roe 
+        # LOGIC FIX:
+        # If ROE is e.g. 0.15 -> It becomes 15.0%
+        # If ROE is e.g. 1.70 (Apple) -> It becomes 170.0%
+        # If ROE is e.g. 15.0 (Already percent) -> It stays 15.0%
+        if roe < 5: 
+            roe = roe * 100
+            
         possible += 30
         pts = 0
         if roe > 20: pts = 30
@@ -111,10 +108,12 @@ def calculate_hybrid_score(av_data):
         log["ROE (Quality)"] = f"{roe:.1f}% ({pts}/30)"
     else: log["ROE"] = "N/A"
     
-    # 5. Operating Margin (Weight: 20) - Cash Efficiency Proxy
+    # 5. Operating Margin (Weight: 20)
     op_margin = safe_float(av_data.get('OperatingMarginTTM'))
     if op_margin:
-        op_margin = op_margin * 100 if op_margin < 1 else op_margin
+        # Same fix for Margin just in case
+        if op_margin < 5: op_margin = op_margin * 100
+            
         possible += 20
         pts = 0
         if op_margin > 20: pts = 20
@@ -130,25 +129,20 @@ def calculate_hybrid_score(av_data):
 # 4. APP UI
 # ==========================================
 
-st.title("🦅 Market Analyzer v6.1 (Pro Data)")
+st.title("🦅 Market Analyzer v6.2 (Mega-Cap Safe)")
 
-# Sidebar for Key
 with st.sidebar:
     st.header("API Settings")
-    # I inserted your key here as the default value
     av_key = st.text_input("Alpha Vantage Key", value="O1U1GWC8OQ4RRBL1", type="password")
-    st.caption("Free Limit: 25 calls per day")
 
-ticker = st.text_input("Enter Ticker", "NVO").upper()
+ticker = st.text_input("Enter Ticker", "AAPL").upper()
 
 if ticker:
-    # 1. Get Chart (Yahoo)
     hist = get_chart_data(ticker)
     
     if hist is not None and not hist.empty:
         curr_price = hist['Close'].iloc[-1]
         
-        # 2. Get Score (Alpha Vantage)
         if av_key:
             with st.spinner("Fetching Professional Data..."):
                 av_data, error = get_alpha_fundamentals(ticker, av_key)
@@ -156,7 +150,6 @@ if ticker:
             if av_data:
                 score, breakdown = calculate_hybrid_score(av_data)
                 
-                # --- DISPLAY ---
                 c1, c2 = st.columns([1, 2])
                 with c1:
                     st.metric("Hybrid Quality Score", f"{score}/100")
