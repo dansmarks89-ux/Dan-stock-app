@@ -84,62 +84,86 @@ def safe_float(val):
     except: return None
 
 # ==========================================
-# 3. SCORING LOGIC (With FCF Yield)
+# 3. SCORING LOGIC (DYNAMIC GRADIENT)
 # ==========================================
+
+def get_points(value, best, worst, max_points, is_higher_better=False):
+    """
+    Calculates points on a sliding scale.
+    Example: PEG. Best=1.0, Worst=3.0, Max=25.
+    If PEG is 2.0, you get 12.5 points.
+    """
+    if value is None: return 0
+    
+    # Clamp values to the range
+    if is_higher_better:
+        if value >= best: return max_points
+        if value <= worst: return 0
+        # Interpolate
+        # Range: Worst (0) -> Best (Max)
+        fraction = (value - worst) / (best - worst)
+    else:
+        # Lower is better (P/E, PEG)
+        if value <= best: return max_points
+        if value >= worst: return 0
+        # Interpolate
+        # Range: Best (Max) -> Worst (0)
+        fraction = (worst - value) / (worst - best)
+        
+    return round(fraction * max_points, 1)
 
 def calculate_alpha_score(overview, cash_flow):
     earned = 0
-    possible = 0
+    total_possible = 0 # Track this in case data is missing
     log = {}
     
-    # 1. Forward P/E (Weight: 10)
+    # --- 1. Forward P/E (Weight: 10) ---
+    # Target: <15 is perfect, >40 is zero.
     pe = safe_float(overview.get('ForwardPE'))
     if pe:
-        possible += 10
-        pts = 0
-        if pe < 20: pts = 10
-        elif 20 <= pe <= 30: pts = 5
+        pts = get_points(pe, best=15, worst=40, max_points=10)
         earned += pts
+        total_possible += 10
         log["Forward P/E"] = f"{pe:.2f} ({pts}/10)"
     else: log["Forward P/E"] = "N/A"
     
-    # 2. EV / EBITDA (Weight: 15)
+    # --- 2. EV / EBITDA (Weight: 15) ---
+    # Target: <10 is perfect, >30 is zero.
     ev_ebitda = safe_float(overview.get('EVToEBITDA'))
     if ev_ebitda:
-        possible += 15
-        pts = 0
-        if ev_ebitda < 12: pts = 15
-        elif 12 <= ev_ebitda <= 20: pts = 7.5
+        pts = get_points(ev_ebitda, best=10, worst=30, max_points=15)
         earned += pts
+        total_possible += 15
         log["EV/EBITDA"] = f"{ev_ebitda:.2f} ({pts}/15)"
     else: log["EV/EBITDA"] = "N/A"
     
-    # 3. PEG Ratio (Weight: 25)
+    # --- 3. PEG Ratio (Weight: 25) ---
+    # Target: <1.0 is perfect, >3.0 is zero.
+    # Note: A PEG of 1.5 is okay, gets ~18 pts.
     peg = safe_float(overview.get('PEGRatio'))
     if peg:
-        possible += 25
-        pts = 0
-        if peg < 1: pts = 25
-        elif 1 <= peg <= 1.5: pts = 12.5
+        pts = get_points(peg, best=1.0, worst=3.0, max_points=25)
         earned += pts
+        total_possible += 25
         log["PEG Ratio"] = f"{peg:.2f} ({pts}/25)"
     else: log["PEG Ratio"] = "N/A"
     
-    # 4. ROE (Weight: 30) - Mega-Cap Safe
+    # --- 4. ROE (Weight: 30) ---
+    # Target: >30% is perfect, <5% is zero.
+    # This rewards Apple/NVO heavily but doesn't break if they have 170%.
     roe = safe_float(overview.get('ReturnOnEquityTTM'))
     if roe:
-        # Fix logic for Apple/NVO (decimals vs percents)
-        if roe < 5: roe = roe * 100
-        possible += 30
-        pts = 0
-        if roe > 20: pts = 30
-        elif 10 <= roe <= 20: pts = 15
+        if roe < 5: roe = roe * 100 # Fix for decimal vs %
+        
+        pts = get_points(roe, best=30, worst=5, max_points=30, is_higher_better=True)
         earned += pts
+        total_possible += 30
         log["ROE (Quality)"] = f"{roe:.1f}% ({pts}/30)"
     else: log["ROE"] = "N/A"
     
-    # 5. FCF YIELD (Weight: 20) - CALCULATED MANUALLY
-    # Formula: (OpCashFlow - CapEx) / MarketCap
+    # --- 5. FCF YIELD (Weight: 20) ---
+    # Target: >6% is perfect, <1% is zero.
+    fcf_yield_val = None
     try:
         annual_reports = cash_flow.get('annualReports', [])
         if annual_reports:
@@ -150,19 +174,24 @@ def calculate_alpha_score(overview, cash_flow):
             
             if ocf and capex and mcap:
                 fcf = ocf - capex
-                fcf_yield = (fcf / mcap) * 100
-                
-                possible += 20
-                pts = 0
-                if fcf_yield > 5: pts = 20
-                elif 3 <= fcf_yield <= 5: pts = 10
-                earned += pts
-                log["FCF Yield"] = f"{fcf_yield:.1f}% ({pts}/20)"
-            else: log["FCF Yield"] = "Data Missing"
-        else: log["FCF Yield"] = "N/A (No Report)"
-    except: log["FCF Yield"] = "Calc Error"
-    
-    score = int((earned / possible) * 100) if possible > 0 else 0
+                fcf_yield_val = (fcf / mcap) * 100
+    except: pass
+
+    if fcf_yield_val is not None:
+        pts = get_points(fcf_yield_val, best=6, worst=1, max_points=20, is_higher_better=True)
+        earned += pts
+        total_possible += 20
+        log["FCF Yield"] = f"{fcf_yield_val:.1f}% ({pts}/20)"
+    else:
+        log["FCF Yield"] = "N/A"
+
+    # Final Score Normalization
+    # If we are missing data (e.g. PEG is N/A), we calculate score based on what we HAVE.
+    if total_possible > 0:
+        score = int((earned / total_possible) * 100)
+    else:
+        score = 0
+        
     return score, log
 
 # ==========================================
