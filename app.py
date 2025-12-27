@@ -10,11 +10,11 @@ from datetime import datetime, timedelta
 # ==========================================
 st.set_page_config(page_title="Market Sector & Stock Analyzer", layout="wide")
 
-# SECURITY: Get API Key (or use hardcoded for testing if Secrets fail)
+# SECURITY: Get API Key
 try:
     API_KEY = st.secrets["FMP_KEY"]
 except:
-    # Fallback to hardcoded if Secrets are missing (Remove this later for security)
+    # Fallback for testing only
     API_KEY = "HO1Gg4eZ38sEt6MhH0SKI7XrhmGjjrX8"
 
 BASE_URL = "https://financialmodelingprep.com/api/v3"
@@ -43,33 +43,26 @@ if 'trade_log' not in st.session_state:
     st.session_state['trade_log'] = []
 
 # ==========================================
-# 2. DATA FETCHING (THE FIX FOR NEW PREMIUM USERS)
+# 2. DATA FETCHING (Using Modern Endpoints)
 # ==========================================
 
 @st.cache_data(ttl=3600*24)
 def get_daily_price_history(ticker):
-    # THE FIX: Use 'historical-chart/1day' instead of 'historical-price-full'
-    # This is the only endpoint supported for Post-Aug-2025 subscribers.
+    # This is the NEW endpoint that fixes the error
     url = f"{BASE_URL}/historical-chart/1day/{ticker}?apikey={API_KEY}"
     
     try:
         data = requests.get(url).json()
-        
-        # Check if FMP returns a list (Success) or Dict (Error)
         if isinstance(data, list) and len(data) > 0:
             df = pd.DataFrame(data)
             df['date'] = pd.to_datetime(df['date'])
             df = df.sort_values('date').set_index('date')
-            # Use 'close' because chart endpoint might not have 'adjClose'
             return df['close']
-        else:
-            return None
-    except:
         return None
+    except: return None
 
 @st.cache_data(ttl=3600*24)
 def get_key_metrics(ticker):
-    # Quarterly metrics usually remain standard, but we add error handling just in case
     url = f"{BASE_URL}/key-metrics/{ticker}?period=quarter&limit=80&apikey={API_KEY}"
     try:
         data = requests.get(url).json()
@@ -97,26 +90,19 @@ def get_ratios(ticker):
 @st.cache_data(ttl=3600*24)
 def get_full_data_merged(ticker):
     prices = get_daily_price_history(ticker)
-    
-    if prices is None: 
-        return None
-        
+    if prices is None: return None
     ratios = get_ratios(ticker)
     metrics = get_key_metrics(ticker)
-    
     df = pd.DataFrame(index=prices.index)
     df['price'] = prices
     
-    # Merge Ratios
     if not ratios.empty:
+        # Check available columns to avoid errors
         cols = ['priceEarningsRatio', 'pegRatio']
-        # Only take cols that actually exist in the response
         existing_cols = [c for c in cols if c in ratios.columns]
         if existing_cols:
-            ratios_subset = ratios[existing_cols]
-            df = pd.merge_asof(df, ratios_subset, left_index=True, right_index=True, direction='backward')
-
-    # Merge Metrics
+            df = pd.merge_asof(df, ratios[existing_cols], left_index=True, right_index=True, direction='backward')
+            
     if not metrics.empty:
         cols_map = {'enterpriseValueOverEBITDA': 'ev_ebitda', 'roic': 'roic', 'freeCashFlowYield': 'fcf_yield'}
         available_cols = [c for c in cols_map.keys() if c in metrics.columns]
@@ -124,10 +110,8 @@ def get_full_data_merged(ticker):
             metrics_subset = metrics[available_cols].rename(columns=cols_map)
             df = pd.merge_asof(df, metrics_subset, left_index=True, right_index=True, direction='backward')
     
-    # Calc Moving Averages
     df['sma_50'] = df['price'].rolling(window=50).mean()
     df['sma_200'] = df['price'].rolling(window=200).mean()
-    
     return df
 
 # ==========================================
@@ -276,7 +260,7 @@ elif page == "Individual Stock Analyzer":
             for v in vars_to_plot:
                 fig_vars.add_trace(go.Scatter(x=df_weekly.index, y=df_weekly[v], name=v))
             st.plotly_chart(fig_vars, use_container_width=True)
-        else: st.error("Data not found or restricted. Please check ticker.")
+        else: st.error("Data not found. Check ticker or API limit.")
 
 elif page == "Trade Tester":
     st.header("🧪 Trade Lab (Backtest)")
