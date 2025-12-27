@@ -54,9 +54,9 @@ BASE_URL = "https://financialmodelingprep.com/api/v3"
 def get_fmp_data(ticker):
     """
     Fetches Premium Data from FMP.
-    Returns: (HistoryDF, MetricsDict)
+    Returns: (HistoryDF, MetricsDict, RatiosDict)
     """
-    # 1. Price History (Using v3 endpoint which usually works for Premium)
+    # 1. Price History
     try:
         url_hist = f"{BASE_URL}/historical-price-full/{ticker}?serietype=line&apikey={API_KEY}"
         r_hist = requests.get(url_hist).json()
@@ -84,6 +84,7 @@ def get_fmp_data(ticker):
         if isinstance(ratios, list) and len(ratios) > 0:
             r_data = ratios[0]
         else: r_data = {}
+    except: r_data = {}  # <--- THIS WAS THE MISSING LINE
         
     return hist_df, m_data, r_data
 
@@ -197,8 +198,6 @@ with tab_analysis:
                 st.write("### Score Metrics")
                 st.table(pd.DataFrame(list(breakdown.items()), columns=["Metric", "Value"]))
                 
-                # Add/Remove from Watchlist Button logic could go here, 
-                # but currently we track EVERYTHING you analyze in the DB.
                 st.success(f"✅ Data point saved for {ticker}")
 
             with col_chart:
@@ -218,8 +217,8 @@ with tab_analysis:
                     st.caption("Analyze this stock again on a future date to see the Score History graph appear here.")
 
         else:
-            st.error("Could not fetch data. If this persists, FMP might still be syncing your Premium status.")
-            st.info("Debugging? Try checking if 'metrics' or 'ratios' came back empty.")
+            st.error("Could not fetch data. FMP might be blocking access or Ticker is invalid.")
+            st.info(f"Debug: History Empty? {hist.empty} | Metrics? {bool(metrics)}")
 
 # --- TAB 2: WATCHLIST ---
 with tab_watchlist:
