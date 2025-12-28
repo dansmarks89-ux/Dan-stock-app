@@ -12,8 +12,7 @@ import time
 # ==========================================
 st.set_page_config(page_title="Alpha Pro v13.0", layout="wide")
 
-# This is your fallback key if Secrets fails
-DEFAULT_KEY = "GLN6L0BRQIEN59OL"
+# (Note: Hardcoded API Key removed for security)
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -249,13 +248,13 @@ st.title("🦅 Alpha Pro v13.0 (Regime-Based)")
 with st.sidebar:
     st.header("Settings")
     
-    # --- AUTOMATIC KEY LOADING ---
-    # Attempt to load from Secrets. If unavailable, use Default Key.
-    try:
+    # --- AUTOMATIC KEY LOADING (NO TEXT BOX) ---
+    if "AV_KEY" in st.secrets:
         key = st.secrets["AV_KEY"]
-    except:
-        key = DEFAULT_KEY
-    # -----------------------------
+    else:
+        key = ""
+        st.warning("⚠️ AV_KEY missing in Secrets")
+    # ------------------------------------------
     
     st.subheader("🧠 Strategy Mode")
     strategy = st.radio("Market Phase", ["Balanced (Default)", "Aggressive Growth", "Defensive Value"])
