@@ -10,29 +10,23 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v11.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v12.0", layout="wide")
 
 DEFAULT_KEY = "GLN6L0BRQIEN59OL"
 
-# Top holdings to simulate "Sector Average" without fetching 500 stocks
-SECTOR_HOLDINGS = {
-    "Technology": ["AAPL", "MSFT", "NVDA"],
-    "Healthcare": ["LLY", "UNH", "JNJ"],
-    "Financials": ["JPM", "V", "MA"],
-    "Energy": ["XOM", "CVX", "EOG"],
-    "Communication": ["GOOGL", "META", "NFLX"],
-    "Consumer Disc": ["AMZN", "TSLA", "HD"],
-    "Consumer Stap": ["PG", "COST", "WMT"],
-    "Industrials": ["GE", "CAT", "UNP"],
-    "Utilities": ["NEE", "SO", "DUK"],
-    "Real Estate": ["PLD", "AMT", "EQIX"]
-}
-
+# Updated for Sector Rotation Tab
 SECTOR_ETFS = {
-    "Technology": "XLK", "Healthcare": "XLV", "Financials": "XLF",
-    "Energy": "XLE", "Communication": "XLC", "Consumer Disc": "XLY",
-    "Consumer Stap": "XLP", "Industrials": "XLI", "Utilities": "XLU",
-    "Real Estate": "XLRE"
+    "Technology (XLK)": "XLK", 
+    "Healthcare (XLV)": "XLV", 
+    "Financials (XLF)": "XLF",
+    "Energy (XLE)": "XLE", 
+    "Communication (XLC)": "XLC", 
+    "Consumer Disc (XLY)": "XLY",
+    "Consumer Stap (XLP)": "XLP", 
+    "Industrials (XLI)": "XLI", 
+    "Utilities (XLU)": "XLU",
+    "Real Estate (XLRE)": "XLRE",
+    "S&P 500 (SPY)": "SPY"
 }
 
 SECTOR_PE_BENCHMARKS = {
@@ -43,7 +37,7 @@ SECTOR_PE_BENCHMARKS = {
 }
 
 # ==========================================
-# 2. GOOGLE SHEETS DATABASE (TICKER, DATE, SCORE)
+# 2. GOOGLE SHEETS DATABASE
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -151,7 +145,7 @@ def get_historical_pe(ticker, api_key, price_df):
         merged = pd.merge_asof(price_df, eps_df['ttm_eps'], left_index=True, right_index=True, direction='backward')
         merged['pe_ratio'] = merged['close'] / merged['ttm_eps']
         
-        # Filter Logic: Clean out negative PE or extreme outliers > 300 for graph readability
+        # Filter Logic
         merged = merged[(merged['pe_ratio'] > 0) & (merged['pe_ratio'] < 300)]
         
         return merged[['pe_ratio']]
@@ -159,7 +153,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE
+# 4. SCORING ENGINE (V2.0 - GROWTH/MOMENTUM)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -172,59 +166,63 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
         if val >= worst: return 0
         return round(((worst - val)/(worst - best)) * max_pts, 1)
 
-def calculate_dynamic_score(overview, cash_flow):
+def calculate_dynamic_score(overview, cash_flow, price_df):
+    """
+    Alpha Score v2.0: Balanced Growth, Value, and Momentum
+    """
     earned, possible = 0, 0
     log = {}
     
-    # 1. PE (10pts)
-    pe = safe_float(overview.get('ForwardPE'))
-    if pe:
-        pts = get_points(pe, 15, 40, 10)
-        earned += pts; possible += 10
-        log["Forward P/E"] = f"{pe:.2f} ({pts}/10)"
-    else: log["Fwd P/E"] = "N/A"
+    # 1. GROWTH (20pts) - Revenue Growth YOY
+    rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+    if rev_growth:
+        # Target: >15% growth is excellent
+        pts = get_points(rev_growth * 100, 20, 0, 20, True)
+        earned += pts; possible += 20
+        log["Revenue Growth"] = f"{rev_growth*100:.1f}% ({pts}/20)"
+    else: log["Rev Growth"] = "N/A"
 
-    # 2. EV/EBITDA (15pts)
-    ev = safe_float(overview.get('EVToEBITDA'))
-    if ev:
-        pts = get_points(ev, 10, 30, 15)
-        earned += pts; possible += 15
-        log["EV/EBITDA"] = f"{ev:.2f} ({pts}/15)"
-    else: log["EV/EBITDA"] = "N/A"
+    # 2. PROFITABILITY (20pts) - Net Profit Margin
+    margin = safe_float(overview.get('ProfitMargin'))
+    if margin:
+        # Target: >20% margin is elite
+        pts = get_points(margin * 100, 25, 5, 20, True)
+        earned += pts; possible += 20
+        log["Profit Margin"] = f"{margin*100:.1f}% ({pts}/20)"
+    else: log["Margins"] = "N/A"
 
-    # 3. PEG (25pts)
-    peg = safe_float(overview.get('PEGRatio'))
-    if peg:
-        pts = get_points(peg, 1.0, 3.0, 25)
-        earned += pts; possible += 25
-        log["PEG Ratio"] = f"{peg:.2f} ({pts}/25)"
-    else: log["PEG"] = "N/A"
-
-    # 4. ROE (30pts)
+    # 3. QUALITY (20pts) - ROE
     roe = safe_float(overview.get('ReturnOnEquityTTM'))
     if roe:
-        if roe < 5: roe = roe * 100
-        pts = get_points(roe, 30, 5, 30, True)
-        earned += pts; possible += 30
-        log["ROE"] = f"{roe:.1f}% ({pts}/30)"
+        if roe < 5: roe = roe * 100 
+        pts = get_points(roe, 25, 5, 20, True)
+        earned += pts; possible += 20
+        log["ROE"] = f"{roe:.1f}% ({pts}/20)"
     else: log["ROE"] = "N/A"
 
-    # 5. FCF Yield (20pts)
-    fcf_val = None
-    try:
-        rep = cash_flow.get('annualReports', [])[0]
-        ocf = safe_float(rep.get('operatingCashflow'))
-        cap = safe_float(rep.get('capitalExpenditures'))
-        mc = safe_float(overview.get('MarketCapitalization'))
-        if ocf and cap and mc:
-            fcf_val = ((ocf - cap)/mc)*100
-    except: pass
-    
-    if fcf_val is not None:
-        pts = get_points(fcf_val, 6, 1, 20, True)
+    # 4. VALUE (20pts) - PEG Ratio
+    peg = safe_float(overview.get('PEGRatio'))
+    if peg:
+        # Target: 1.0 is fair. >2.5 is expensive.
+        pts = get_points(peg, 1.0, 2.5, 20) 
         earned += pts; possible += 20
-        log["FCF Yield"] = f"{fcf_val:.1f}% ({pts}/20)"
-    else: log["FCF Yield"] = "N/A"
+        log["PEG Ratio"] = f"{peg:.2f} ({pts}/20)"
+    else: log["PEG"] = "N/A"
+
+    # 5. MOMENTUM (20pts) - Price vs 200-Day Moving Average
+    if not price_df.empty and len(price_df) > 200:
+        curr_price = price_df['close'].iloc[-1]
+        ma_200 = price_df['close'].rolling(window=200).mean().iloc[-1]
+        
+        # Percent above/below 200MA
+        pct_diff = ((curr_price / ma_200) - 1) * 100
+        
+        # Target: If >0% (uptrend), max pts. If <-10% (downtrend), 0 pts.
+        pts = get_points(pct_diff, 5, -10, 20, True)
+        earned += pts; possible += 20
+        log["vs 200-Day MA"] = f"{pct_diff:+.1f}% ({pts}/20)"
+    else:
+        log["Momentum"] = "N/A"
 
     score = int((earned/possible)*100) if possible > 0 else 0
     return score, log
@@ -269,7 +267,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v11.0 (Cloud Edition)")
+st.title("🦅 Alpha Pro v12.0 (Analysis & Flows)")
 
 with st.sidebar:
     st.header("Settings")
@@ -282,7 +280,7 @@ with st.sidebar:
     unique_tickers = st.session_state.watchlist_df['Ticker'].unique().tolist() if not st.session_state.watchlist_df.empty else []
     st.info(f"Tracking {len(unique_tickers)} Stocks")
 
-t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sectors"])
+t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows"])
 
 # --- TAB 1: ANALYSIS ---
 with t1:
@@ -294,7 +292,8 @@ with t1:
             hist, ov, cf = get_alpha_data(tick, key)
             
         if not hist.empty and ov:
-            score, log = calculate_dynamic_score(ov, cf)
+            # UPDATED: Passing 'hist' for Momentum calculation
+            score, log = calculate_dynamic_score(ov, cf, hist)
             
             with st.spinner("Calculating Historical P/E..."):
                 pe_hist = get_historical_pe(tick, key, hist)
@@ -314,7 +313,7 @@ with t1:
             col_metrics, col_chart = st.columns([1, 2])
             
             with col_metrics:
-                st.metric("Quality Score", f"{score}/100")
+                st.metric("Alpha Score v2.0", f"{score}/100")
                 st.table(pd.DataFrame(list(log.items()), columns=["Metric", "Value"]))
                 
                 # --- GOOGLE SHEETS ADD BUTTON ---
@@ -372,7 +371,7 @@ with t2:
                     st.rerun()
             st.divider()
 
-# --- TAB 3: SECTOR ROTATION & FLOWS ---
+# --- TAB 3: SECTOR ROTATION & FLOWS (UPDATED) ---
 with t3:
     st.header("Sector Rotation & Money Flows")
     st.markdown("""
@@ -382,34 +381,20 @@ with t3:
     * **Falling Line:** Money is rotating **OUT** of this sector (Underperforming).
     """)
 
-    # 1. Configuration
-    SECTOR_ETFS = {
-        "Technology (XLK)": "XLK", 
-        "Healthcare (XLV)": "XLV", 
-        "Financials (XLF)": "XLF",
-        "Energy (XLE)": "XLE", 
-        "Communication (XLC)": "XLC", 
-        "Consumer Disc (XLY)": "XLY",
-        "Consumer Stap (XLP)": "XLP", 
-        "Industrials (XLI)": "XLI", 
-        "Utilities (XLU)": "XLU",
-        "Real Estate (XLRE)": "XLRE",
-        "S&P 500 (SPY)": "SPY"
-    }
-
-    # 2. Controls
+    # Controls
     c_sel, c_tf = st.columns([3, 1])
     with c_sel:
-        # Default to comparing Tech vs Energy vs Market
+        # Filter out SPY from the selection list (it's the benchmark)
+        selectable = [k for k in SECTOR_ETFS.keys() if "SPY" not in k]
         selected_sectors = st.multiselect(
             "Select Sectors to Compare", 
-            list(SECTOR_ETFS.keys()), 
+            selectable, 
             default=["Technology (XLK)", "Energy (XLE)", "Financials (XLF)"]
         )
     with c_tf:
         days = tf_selector("rot")
 
-    # 3. The Analysis Engine
+    # The Analysis Engine
     if st.button("Analyze Flows", type="primary"):
         if not selected_sectors:
             st.error("Please select at least one sector.")
@@ -426,8 +411,7 @@ with t3:
                 spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
                 
                 # Data container
-                df_rel = pd.DataFrame() # For Relative Performance (The "Flows")
-                df_abs = pd.DataFrame() # For Absolute Price (The "Trend")
+                df_rel = pd.DataFrame() # For Relative Performance
                 metrics = []
 
                 # B. Fetch Each Selected Sector
@@ -436,7 +420,7 @@ with t3:
                 for i, sec_name in enumerate(selected_sectors):
                     ticker = SECTOR_ETFS[sec_name]
                     
-                    # Rate limit pause (AlphaVantage free tier is 5 calls/min)
+                    # Rate limit pause
                     if i > 0: time.sleep(1.5) 
                     
                     hist, _, _ = get_alpha_data(ticker, key)
@@ -446,20 +430,16 @@ with t3:
                         sec_sub = hist[hist.index >= cutoff]['close']
                         
                         # 1. Calculate Relative Strength (Sector / SPY)
-                        # We reindex to match SPY dates to handle any missing days
                         combined = pd.concat([sec_sub, spy_sub], axis=1).dropna()
                         combined.columns = ['Sector', 'SPY']
                         
-                        # "Relative Ratio": If > 1, beating market. If rising, gaining momentum.
-                        # We normalize start to 0% for easier comparison
+                        # Normalize start to 0%
                         rel_perf = (combined['Sector'] / combined['SPY'])
                         rel_perf = ((rel_perf / rel_perf.iloc[0]) - 1) * 100
                         
                         df_rel[sec_name] = rel_perf
-                        df_abs[sec_name] = sec_sub
 
                         # 2. Calculate "Overvalued" Metric (Distance from 200MA)
-                        # Current Price vs 200 Day Moving Average
                         ma_200 = hist['close'].rolling(window=200).mean().iloc[-1]
                         curr_price = hist['close'].iloc[-1]
                         
@@ -484,15 +464,13 @@ with t3:
                 
                 # 1. The "Flows" Chart
                 st.subheader(f"🔄 Money Flows (Relative to S&P 500)")
-                st.caption("A rising line means the sector is attracting money (Beating the Market).")
                 if not df_rel.empty:
                     fig_rel = px.line(df_rel, title=f"Relative Performance vs SPY (Last {days} Days)")
                     fig_rel.update_layout(yaxis_title="Outperformance %")
-                    # Add a zero line
                     fig_rel.add_hline(y=0, line_dash="dot", line_color="white", opacity=0.5)
                     st.plotly_chart(fig_rel, use_container_width=True)
 
                 # 2. The "Overvalued" Metrics
-                st.subheader("⚠️ Valuation Check (Technical)")
-                st.caption("Sectors >15% above their 200-Day average are often considered 'Overextended'.")
-                st.table(pd.DataFrame(metrics).set_index("Sector"))
+                st.subheader("⚠️ Valuation Check")
+                if metrics:
+                    st.table(pd.DataFrame(metrics).set_index("Sector"))
