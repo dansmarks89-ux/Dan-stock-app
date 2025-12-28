@@ -87,7 +87,7 @@ def safe_float(val):
         return float(val)
     except: return None
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def get_alpha_data(ticker, api_key):
     base = "https://www.alphavantage.co/query"
     try: r_ov = requests.get(f"{base}?function=OVERVIEW&symbol={ticker}&apikey={api_key}").json()
@@ -96,15 +96,25 @@ def get_alpha_data(ticker, api_key):
     try: r_cf = requests.get(f"{base}?function=CASH_FLOW&symbol={ticker}&apikey={api_key}").json()
     except: r_cf = {}
     
+    # --- UPDATED TO 'ADJUSTED' TO FIX DIVIDEND DROPS ---
     try:
-        r_price = requests.get(f"{base}?function=TIME_SERIES_DAILY&symbol={ticker}&outputsize=full&apikey={api_key}").json()
+        # Switch from TIME_SERIES_DAILY to TIME_SERIES_DAILY_ADJUSTED
+        r_price = requests.get(f"{base}?function=TIME_SERIES_DAILY_ADJUSTED&symbol={ticker}&outputsize=full&apikey={api_key}").json()
         ts = r_price.get('Time Series (Daily)', {})
         if ts:
             df = pd.DataFrame.from_dict(ts, orient='index')
             df = df.astype(float)
             df.index = pd.to_datetime(df.index)
             df = df.sort_index()
-            df = df.rename(columns={'4. close': 'close'})
+            
+            # IMPORTANT: Rename '5. adjusted close' to 'close' so the rest of your app works
+            # This column accounts for dividends/splits
+            if '5. adjusted close' in df.columns:
+                df = df.rename(columns={'5. adjusted close': 'close'})
+            else:
+                # Fallback if adjusted isn't present for some reason
+                df = df.rename(columns={'4. close': 'close'})
+                
         else: df = pd.DataFrame()
     except: df = pd.DataFrame()
         
