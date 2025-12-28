@@ -256,7 +256,16 @@ st.title("🦅 Alpha Pro v13.0 (Regime-Based)")
 
 with st.sidebar:
     st.header("Settings")
-    key = st.text_input("API Key", value=DEFAULT_KEY, type="password")
+    
+    # Try to load key from Secrets, otherwise leave empty
+    try:
+        secret_key = st.secrets["AV_KEY"]
+    except:
+        secret_key = ""
+        
+    # The text input will now default to your secret key (hidden)
+    # If no secret is found, the user must type one in.
+    key = st.text_input("API Key", value=secret_key, type="password")
     
     st.markdown("---")
     st.subheader("🧠 Strategy Mode")
