@@ -3,5 +3,4 @@ pandas
 requests
 plotly
 numpy
-yfinance
 streamlit-google-sheets
