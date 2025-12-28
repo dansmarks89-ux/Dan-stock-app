@@ -265,7 +265,7 @@ with t1:
             st.markdown(f"## {tick} - {ov.get('Name')}")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
-            k2.metric("Div Yield", f"{safe_float(ov.get('DividendYield',0))*100:.2f}%" if ov.get('DividendYield') else "0%")
+            k2.metric("Div Yield", f"{(safe_float(ov.get('DividendYield', 0)) or 0) * 100:.2f}%")
             k3.metric("Fwd P/E", f"{pe_now:.2f}")
             k4.metric("Sector Avg P/E", sec_avg, delta=f"{sec_avg - pe_now:.1f}")
             
