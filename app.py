@@ -12,6 +12,7 @@ import time
 # ==========================================
 st.set_page_config(page_title="Alpha Pro v13.0", layout="wide")
 
+# This is your fallback key if Secrets fails
 DEFAULT_KEY = "GLN6L0BRQIEN59OL"
 
 SECTOR_ETFS = {
@@ -139,7 +140,6 @@ def get_historical_pe(ticker, api_key, price_df):
 # 4. SCORING ENGINE (V2.1 - DYNAMIC WEIGHTS)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
-    # This function returns a score on a 0-20 scale (normalized base)
     if val is None: return 0
     if high_is_good:
         if val >= best: return max_pts
@@ -162,8 +162,6 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
         nonlocal earned, possible
         w = weights[weight_key]
         if raw_val is not None:
-            # base_score is out of 20. We need to scale it to the weight.
-            # Formula: (Base Score / 20) * Weight
             weighted_points = (base_score / 20) * w
             earned += weighted_points
             possible += w
@@ -171,28 +169,28 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
         else:
             return "N/A"
 
-    # 1. GROWTH - Revenue Growth YOY
+    # 1. GROWTH
     rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
     base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
     log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
-    # 2. PROFITABILITY - Net Profit Margin
+    # 2. PROFITABILITY
     margin = safe_float(overview.get('ProfitMargin'))
     base_pts = get_points(margin * 100, 25, 5, 20, True) if margin else 0
     log["Profit Margin"] = process_metric("Margin", f"{margin*100:.1f}%" if margin else None, 'margins', base_pts)
 
-    # 3. QUALITY - ROE
+    # 3. QUALITY
     roe = safe_float(overview.get('ReturnOnEquityTTM'))
-    if roe and roe < 5: roe = roe * 100 # Fix decimal bug
+    if roe and roe < 5: roe = roe * 100 
     base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
     log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # 4. VALUE - PEG Ratio
+    # 4. VALUE
     peg = safe_float(overview.get('PEGRatio'))
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM - Price vs 200-Day Moving Average (With Parabolic Penalty)
+    # 5. MOMENTUM (With Parabolic Penalty)
     pct_diff = None
     base_pts = 0
     if not price_df.empty and len(price_df) > 200:
@@ -200,25 +198,19 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
         ma_200 = price_df['close'].rolling(window=200).mean().iloc[-1]
         pct_diff = ((curr_price / ma_200) - 1) * 100
         
-        # LOGIC:
-        # 1. Downtrend (< 0%): 0 points.
-        # 2. Healthy Uptrend (0% to 25%): Full points (20).
-        # 3. Overheated (> 25%): Lose points as it gets higher (Risk of pullback).
-        
         if pct_diff < 0:
             base_pts = 0
             note = "Downtrend"
         elif 0 <= pct_diff <= 25:
-            # The "Sweet Spot" - Full Points
             base_pts = 20
             note = "Healthy Trend"
         else:
-            # PARABOLIC PENALTY:
-            # If it's >25%, we start deducting points.
-            # Example: At 50% extension, score drops to 10/20.
-            penalty = (pct_diff - 25) * 0.5 # Deduct 0.5 pts for every 1% over 25%
+            # PARABOLIC PENALTY
+            penalty = (pct_diff - 25) * 0.5 
             base_pts = max(0, 20 - penalty)
             note = "⚠️ Overheated"
+    else:
+        note = "No Data"
 
     val_str = f"{pct_diff:+.1f}% ({note})" if pct_diff is not None else None
     log["vs 200-Day MA"] = process_metric("Momentum", val_str, 'momentum', base_pts)
@@ -257,31 +249,25 @@ st.title("🦅 Alpha Pro v13.0 (Regime-Based)")
 with st.sidebar:
     st.header("Settings")
     
-    # Try to load key from Secrets, otherwise leave empty
+    # --- AUTOMATIC KEY LOADING ---
+    # Attempt to load from Secrets. If unavailable, use Default Key.
     try:
-        secret_key = st.secrets["AV_KEY"]
+        key = st.secrets["AV_KEY"]
     except:
-        secret_key = ""
-        
-    # The text input will now default to your secret key (hidden)
-    # If no secret is found, the user must type one in.
-    key = st.text_input("API Key", value=secret_key, type="password")
+        key = DEFAULT_KEY
+    # -----------------------------
     
-    st.markdown("---")
     st.subheader("🧠 Strategy Mode")
     strategy = st.radio("Market Phase", ["Balanced (Default)", "Aggressive Growth", "Defensive Value"])
     
     # Define Weights based on selection
     if "Growth" in strategy:
-        # Aggressive: Favors Rev Growth & Momentum
         active_weights = {'growth': 35, 'momentum': 30, 'margins': 15, 'roe': 10, 'value': 10}
-        st.caption("🚀 Focus: High Growth, Uptrends. Ignores Valuation.")
+        st.caption("🚀 Focus: High Growth, Uptrends.")
     elif "Value" in strategy:
-        # Defensive: Favors PEG, Margins, ROE
         active_weights = {'growth': 10, 'momentum': 10, 'margins': 25, 'roe': 25, 'value': 30}
-        st.caption("🛡️ Focus: Cash Flow, Low Debt, Cheap Price.")
+        st.caption("🛡️ Focus: Cash Flow, Cheap Price.")
     else:
-        # Balanced (Default)
         active_weights = {'growth': 20, 'momentum': 20, 'margins': 20, 'roe': 20, 'value': 20}
         st.caption("⚖️ Focus: All-Weather Blend.")
 
@@ -305,7 +291,6 @@ with t1:
             hist, ov, cf = get_alpha_data(tick, key)
             
         if not hist.empty and ov:
-            # Pass the active_weights to the calculator
             score, log = calculate_dynamic_score(ov, cf, hist, active_weights)
             
             with st.spinner("Calculating Historical P/E..."):
@@ -320,7 +305,8 @@ with t1:
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
             k2.metric("Div Yield", f"{(safe_float(ov.get('DividendYield', 0)) or 0) * 100:.2f}%")
-            # Safe Fwd P/E Display
+            
+            # Safe P/E Logic
             if pe_now is not None:
                 k3.metric("Fwd P/E", f"{pe_now:.2f}")
                 k4.metric("Sector Avg P/E", sec_avg, delta=f"{sec_avg - pe_now:.1f}")
