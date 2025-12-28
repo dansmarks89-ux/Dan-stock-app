@@ -372,83 +372,127 @@ with t2:
                     st.rerun()
             st.divider()
 
-# --- TAB 3: SECTORS (ENHANCED) ---
+# --- TAB 3: SECTOR ROTATION & FLOWS ---
 with t3:
-    st.header("Sector Deep Dive")
-    
-    mode = st.radio("Mode", ["Individual Sector Analysis", "All Sectors Comparison"], horizontal=True)
-    
-    days = tf_selector("sec")
+    st.header("Sector Rotation & Money Flows")
+    st.markdown("""
+    **How to read this:**
+    * **Money Flow:** We compare each sector against the S&P 500 (SPY).
+    * **Rising Line:** Money is rotating **INTO** this sector (Outperforming).
+    * **Falling Line:** Money is rotating **OUT** of this sector (Underperforming).
+    """)
 
-    if mode == "Individual Sector Analysis":
-        selected_sector = st.selectbox("Select Sector", list(SECTOR_HOLDINGS.keys()))
-        
-        if st.button(f"Analyze {selected_sector}"):
-            components = SECTOR_HOLDINGS[selected_sector]
-            st.write(f"Analyzing Top Holdings: {', '.join(components)}")
-            
-            combined_pe = pd.DataFrame()
-            
-            with st.spinner(f"Fetching data for {len(components)} stocks... (This may take a moment)"):
-                for s_tick in components:
-                    # Get price and PE for each component
-                    h, _, _ = get_alpha_data(s_tick, key)
-                    if not h.empty:
-                        pe_data = get_historical_pe(s_tick, key, h)
-                        if not pe_data.empty:
-                            # Rename column to ticker name for merging
-                            pe_data = pe_data.rename(columns={'pe_ratio': s_tick})
-                            
-                            if combined_pe.empty:
-                                combined_pe = pe_data
-                            else:
-                                combined_pe = combined_pe.join(pe_data, how='outer')
-            
-            if not combined_pe.empty:
-                # 1. Calculate Average
-                combined_pe['Average'] = combined_pe.mean(axis=1)
-                
-                # 2. Filter Date Range
-                cutoff = combined_pe.index[-1] - timedelta(days=days)
-                chart_data = combined_pe[combined_pe.index >= cutoff]
-                
-                # 3. Plot
-                fig = px.line(chart_data, title=f"{selected_sector}: Holdings P/E vs Average")
-                # Make the Average line thicker and black
-                fig.update_traces(selector=dict(name='Average'), line=dict(color='black', width=4, dash='dot'))
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Could not fetch sufficient data for these stocks.")
+    # 1. Configuration
+    SECTOR_ETFS = {
+        "Technology (XLK)": "XLK", 
+        "Healthcare (XLV)": "XLV", 
+        "Financials (XLF)": "XLF",
+        "Energy (XLE)": "XLE", 
+        "Communication (XLC)": "XLC", 
+        "Consumer Disc (XLY)": "XLY",
+        "Consumer Stap (XLP)": "XLP", 
+        "Industrials (XLI)": "XLI", 
+        "Utilities (XLU)": "XLU",
+        "Real Estate (XLRE)": "XLRE",
+        "S&P 500 (SPY)": "SPY"
+    }
 
-    else:
-        # ALL SECTORS COMPARISON
-        st.subheader("Sector Valuation Comparison (ETF Proxy)")
-        st.info("Using Sector ETFs to represent the sector average.")
-        
-        if st.button("Run Market-Wide Analysis"):
-            all_sector_pe = pd.DataFrame()
-            
-            progress_bar = st.progress(0)
-            count = 0
-            
-            for s_name, s_etf in SECTOR_ETFS.items():
-                h, _, _ = get_alpha_data(s_etf, key)
-                if not h.empty:
-                    pe = get_historical_pe(s_etf, key, h)
-                    if not pe.empty:
-                        pe = pe.rename(columns={'pe_ratio': s_name})
-                        if all_sector_pe.empty:
-                            all_sector_pe = pe
+    # 2. Controls
+    c_sel, c_tf = st.columns([3, 1])
+    with c_sel:
+        # Default to comparing Tech vs Energy vs Market
+        selected_sectors = st.multiselect(
+            "Select Sectors to Compare", 
+            list(SECTOR_ETFS.keys()), 
+            default=["Technology (XLK)", "Energy (XLE)", "Financials (XLF)"]
+        )
+    with c_tf:
+        days = tf_selector("rot")
+
+    # 3. The Analysis Engine
+    if st.button("Analyze Flows", type="primary"):
+        if not selected_sectors:
+            st.error("Please select at least one sector.")
+        else:
+            # A. Fetch Benchmark (SPY) first
+            with st.spinner("Analyzing Market Flows..."):
+                spy_hist, _, _ = get_alpha_data("SPY", key)
+                if spy_hist.empty:
+                    st.error("Could not fetch S&P 500 data. Check API Key.")
+                    st.stop()
+                
+                # Filter SPY by date
+                cutoff = spy_hist.index[-1] - timedelta(days=days)
+                spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
+                
+                # Data container
+                df_rel = pd.DataFrame() # For Relative Performance (The "Flows")
+                df_abs = pd.DataFrame() # For Absolute Price (The "Trend")
+                metrics = []
+
+                # B. Fetch Each Selected Sector
+                progress = st.progress(0)
+                
+                for i, sec_name in enumerate(selected_sectors):
+                    ticker = SECTOR_ETFS[sec_name]
+                    
+                    # Rate limit pause (AlphaVantage free tier is 5 calls/min)
+                    if i > 0: time.sleep(1.5) 
+                    
+                    hist, _, _ = get_alpha_data(ticker, key)
+                    
+                    if not hist.empty:
+                        # Align dates with SPY
+                        sec_sub = hist[hist.index >= cutoff]['close']
+                        
+                        # 1. Calculate Relative Strength (Sector / SPY)
+                        # We reindex to match SPY dates to handle any missing days
+                        combined = pd.concat([sec_sub, spy_sub], axis=1).dropna()
+                        combined.columns = ['Sector', 'SPY']
+                        
+                        # "Relative Ratio": If > 1, beating market. If rising, gaining momentum.
+                        # We normalize start to 0% for easier comparison
+                        rel_perf = (combined['Sector'] / combined['SPY'])
+                        rel_perf = ((rel_perf / rel_perf.iloc[0]) - 1) * 100
+                        
+                        df_rel[sec_name] = rel_perf
+                        df_abs[sec_name] = sec_sub
+
+                        # 2. Calculate "Overvalued" Metric (Distance from 200MA)
+                        # Current Price vs 200 Day Moving Average
+                        ma_200 = hist['close'].rolling(window=200).mean().iloc[-1]
+                        curr_price = hist['close'].iloc[-1]
+                        
+                        if pd.notna(ma_200):
+                            dist = ((curr_price / ma_200) - 1) * 100
+                            status = "🔥 Overheated" if dist > 15 else "❄️ Oversold" if dist < -5 else "Normal"
                         else:
-                            all_sector_pe = all_sector_pe.join(pe, how='outer')
-                count += 1
-                progress_bar.progress(count / len(SECTOR_ETFS))
-            
-            if not all_sector_pe.empty:
-                cutoff = all_sector_pe.index[-1] - timedelta(days=days)
-                chart_data = all_sector_pe[all_sector_pe.index >= cutoff]
+                            dist = 0
+                            status = "N/A"
+
+                        metrics.append({
+                            "Sector": sec_name,
+                            "Price": f"${curr_price:.2f}",
+                            "vs 200-Day Avg": f"{dist:+.1f}%",
+                            "Status": status
+                        })
+                    
+                    progress.progress((i + 1) / len(selected_sectors))
                 
-                fig = px.line(chart_data, title="Sector P/E Ratios Over Time")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.error("Could not fetch sector data.")
+                # C. Visualize
+                st.divider()
+                
+                # 1. The "Flows" Chart
+                st.subheader(f"🔄 Money Flows (Relative to S&P 500)")
+                st.caption("A rising line means the sector is attracting money (Beating the Market).")
+                if not df_rel.empty:
+                    fig_rel = px.line(df_rel, title=f"Relative Performance vs SPY (Last {days} Days)")
+                    fig_rel.update_layout(yaxis_title="Outperformance %")
+                    # Add a zero line
+                    fig_rel.add_hline(y=0, line_dash="dot", line_color="white", opacity=0.5)
+                    st.plotly_chart(fig_rel, use_container_width=True)
+
+                # 2. The "Overvalued" Metrics
+                st.subheader("⚠️ Valuation Check (Technical)")
+                st.caption("Sectors >15% above their 200-Day average are often considered 'Overextended'.")
+                st.table(pd.DataFrame(metrics).set_index("Sector"))
