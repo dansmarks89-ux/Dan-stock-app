@@ -192,16 +192,35 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM - Price vs 200-Day Moving Average
+    # 5. MOMENTUM - Price vs 200-Day Moving Average (With Parabolic Penalty)
     pct_diff = None
     base_pts = 0
     if not price_df.empty and len(price_df) > 200:
         curr_price = price_df['close'].iloc[-1]
         ma_200 = price_df['close'].rolling(window=200).mean().iloc[-1]
         pct_diff = ((curr_price / ma_200) - 1) * 100
-        base_pts = get_points(pct_diff, 5, -10, 20, True)
-    
-    val_str = f"{pct_diff:+.1f}%" if pct_diff is not None else None
+        
+        # LOGIC:
+        # 1. Downtrend (< 0%): 0 points.
+        # 2. Healthy Uptrend (0% to 25%): Full points (20).
+        # 3. Overheated (> 25%): Lose points as it gets higher (Risk of pullback).
+        
+        if pct_diff < 0:
+            base_pts = 0
+            note = "Downtrend"
+        elif 0 <= pct_diff <= 25:
+            # The "Sweet Spot" - Full Points
+            base_pts = 20
+            note = "Healthy Trend"
+        else:
+            # PARABOLIC PENALTY:
+            # If it's >25%, we start deducting points.
+            # Example: At 50% extension, score drops to 10/20.
+            penalty = (pct_diff - 25) * 0.5 # Deduct 0.5 pts for every 1% over 25%
+            base_pts = max(0, 20 - penalty)
+            note = "⚠️ Overheated"
+
+    val_str = f"{pct_diff:+.1f}% ({note})" if pct_diff is not None else None
     log["vs 200-Day MA"] = process_metric("Momentum", val_str, 'momentum', base_pts)
 
     # Final Score
