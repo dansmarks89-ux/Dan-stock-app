@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v16.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v17.0", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -33,19 +33,10 @@ SECTOR_PE_BENCHMARKS = {
     "REAL ESTATE": 35.0
 }
 
-# --- UPDATED STRATEGY WEIGHTS ---
-# 1. Balanced: The "All-Weather" Portfolio
+# --- STRATEGY WEIGHTS ---
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'margins': 20, 'roe': 20, 'value': 20}
-
-# 2. Aggressive: Mag 7 Focus (Growth/Mom dominant, but with a 10% Quality/Value Floor)
-# Growth 40 + Mom 40 + Margin 10 + ROE 5 + Value 5 = 100
 WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'margins': 10, 'roe': 5, 'value': 5}
-
-# 3. Defensive: The "Bottom Fisher" (Value dominant, but accounts for slight growth)
-# Value 40 + Mom 35 + ROE 20 + Growth 5 = 100
 WEIGHTS_DEFENSIVE = {'growth': 5, 'momentum': 35, 'margins': 0, 'roe': 20, 'value': 40}
-
-# 4. Speculative: The "Rocket" (Hype only. Uses 50-Day MA)
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'margins': 0, 'roe': 0, 'value': 0}
 
 # ==========================================
@@ -59,15 +50,15 @@ def get_watchlist_data():
         df = conn.read(worksheet="Sheet1", ttl=0)
         df = df.dropna(subset=['Ticker'])
         if 'Ticker' not in df.columns:
-            return pd.DataFrame(columns=["Ticker", "Date", "Score"])
+            return pd.DataFrame()
         return df
     except Exception:
-        return pd.DataFrame(columns=["Ticker", "Date", "Score"])
+        return pd.DataFrame()
 
-def add_log_to_sheet(ticker, active_score, raw_metrics, scores_dict):
+def add_log_to_sheet(ticker, raw_metrics, scores_dict):
     """
-    Appends or Updates a stock entry in the sheet.
-    Ensures 1 line per ticker.
+    APPENDS a new entry to the sheet (History Mode).
+    Removed the generic 'Score' column.
     """
     try:
         existing_df = get_watchlist_data()
@@ -75,7 +66,7 @@ def add_log_to_sheet(ticker, active_score, raw_metrics, scores_dict):
         new_data = {
             "Ticker": ticker,
             "Date": datetime.now().strftime("%Y-%m-%d"),
-            "Score": active_score, 
+            # "Score": Removed as requested
             "Rev Growth": raw_metrics.get('Rev Growth'),
             "Profit Margin": raw_metrics.get('Profit Margin'),
             "ROE": raw_metrics.get('ROE'),
@@ -90,11 +81,8 @@ def add_log_to_sheet(ticker, active_score, raw_metrics, scores_dict):
         
         new_row = pd.DataFrame([new_data])
         
-        if not existing_df.empty:
-            existing_df = existing_df[existing_df['Ticker'] != ticker]
-            updated_df = pd.concat([existing_df, new_row], ignore_index=True)
-        else:
-            updated_df = new_row
+        # APPEND only (Do not delete old rows for this ticker)
+        updated_df = pd.concat([existing_df, new_row], ignore_index=True)
             
         conn.update(worksheet="Sheet1", data=updated_df)
         st.cache_data.clear()
@@ -104,7 +92,7 @@ def add_log_to_sheet(ticker, active_score, raw_metrics, scores_dict):
         return False
 
 def remove_ticker_from_sheet(ticker):
-    """Removes a specific ticker."""
+    """Removes ALL history for a specific ticker."""
     try:
         df = get_watchlist_data()
         if not df.empty:
@@ -172,7 +160,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (UPDATED FOR 50MA)
+# 4. SCORING ENGINE (UPDATED)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -188,14 +176,12 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
 def calculate_dynamic_score(overview, cash_flow, price_df, weights, use_50ma=False):
     """
     Returns: Final Score (int), Log (dict), Raw Metrics (dict), Base Scores (dict)
-    use_50ma: If True, uses 50-Day Moving Average for Momentum (Speculative Mode).
     """
     earned, possible = 0, 0
     log = {}
     raw_metrics = {}
     base_scores = {} 
     
-    # Helper to clean up logic
     def process_metric(label, raw_val, weight_key, base_score):
         nonlocal earned, possible
         base_scores[weight_key] = base_score
@@ -207,7 +193,6 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights, use_50ma=Fal
             possible += w
             return f"{raw_val} ({weighted_points:.1f}/{w})"
         else:
-            # N/A Penalty: 0 points earned, but weight remains in 'possible'
             earned += 0
             possible += w
             return f"N/A (0.0/{w})"
@@ -237,18 +222,16 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights, use_50ma=Fal
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM (Conditional: 200MA or 50MA)
+    # 5. MOMENTUM
     pct_diff = None
     slope_pct = None
     base_pts = 0
     
-    # Define MA Window based on mode
     ma_window = 50 if use_50ma else 200
-    slope_lookback = 22 if use_50ma else 63 # 22 days ~1 month for 50MA, 63 days ~3 mo for 200MA
+    slope_lookback = 22 if use_50ma else 63
     required_history = ma_window + slope_lookback + 5
     
     if not price_df.empty and len(price_df) > required_history:
-        # A. Position
         curr_price = price_df['close'].iloc[-1]
         ma_now = price_df['close'].rolling(window=ma_window).mean().iloc[-1]
         
@@ -258,25 +241,20 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights, use_50ma=Fal
             if pct_diff < 0: pos_score = 0
             elif 0 <= pct_diff <= 25: pos_score = 10
             else: 
-                # Parabolic Penalty (Max 5 floor)
                 penalty = (pct_diff - 25) * 0.5
                 pos_score = max(5, 10 - penalty)
         
-        # B. Velocity
         ma_old = price_df['close'].rolling(window=ma_window).mean().iloc[-slope_lookback]
         slope_score = 0
         if pd.notna(ma_old) and ma_old > 0:
             slope_pct = ((ma_now - ma_old) / ma_old) * 100
             if slope_pct <= 0: slope_score = 0
             else:
-                # 50MA moves faster, so we expect steeper slopes. 
-                # Target 10% slope for 50MA, 5% for 200MA to get full points.
                 target_slope = 10 if use_50ma else 5
                 slope_score = min(10, (slope_pct / target_slope) * 10)
         
         base_pts = pos_score + slope_score
         
-        # For Log Label
         ma_label = "50-Day" if use_50ma else "200-Day"
         trend_status = "Falling" if (slope_pct or 0) < 0 else "Flat" if (slope_pct or 0) < 1 else "Rising"
         val_str = f"Pos: {pct_diff:+.1f}% / Slope: {slope_pct:+.1f}% ({trend_status})"
@@ -293,7 +271,6 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights, use_50ma=Fal
     score = int((earned/possible)*100) if possible > 0 else 0
     return score, log, raw_metrics, base_scores
 
-# Helper to compute any score from base points
 def compute_weighted_score(base_scores, weights):
     earned = 0
     possible = 0
@@ -327,7 +304,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v16.0 (Versatile Edition)")
+st.title("🦅 Alpha Pro v17.0 (Portfolio Tracker)")
 
 with st.sidebar:
     st.header("Settings")
@@ -340,7 +317,6 @@ with st.sidebar:
     st.subheader("🧠 Strategy Mode")
     strategy = st.radio("Market Phase", ["Balanced", "Aggressive Growth", "Defensive / Cyclical", "Speculative / Hype"])
     
-    # Pass the 'Speculative' flag if needed
     is_speculative = False
     
     if "Aggressive" in strategy:
@@ -380,10 +356,8 @@ with t1:
             hist, ov, cf = get_alpha_data(tick, key)
             
         if not hist.empty and ov:
-            # Calculate metrics (Pass the 50MA flag)
             score, log, raw_metrics, base_scores = calculate_dynamic_score(ov, cf, hist, active_weights, use_50ma=is_speculative)
             
-            # Calculate ALL scores for database
             scores_db = {
                 'Balanced': compute_weighted_score(base_scores, WEIGHTS_BALANCED),
                 'Aggressive': compute_weighted_score(base_scores, WEIGHTS_AGGRESSIVE),
@@ -394,13 +368,11 @@ with t1:
             with st.spinner("Calculating Historical P/E..."):
                 pe_hist = get_historical_pe(tick, key, hist)
             
-            # Latest Price
             curr_price = hist['close'].iloc[-1]
             if len(hist) > 1:
                 day_delta = curr_price - hist['close'].iloc[-2]
             else: day_delta = 0
             
-            # Use Trailing P/E for display match
             pe_now = safe_float(ov.get('PERatio', 0))
             sec = ov.get('Sector', 'Unknown')
             sec_avg = SECTOR_PE_BENCHMARKS.get(sec.upper(), 20.0)
@@ -419,11 +391,12 @@ with t1:
             
             col_metrics, col_chart = st.columns([1, 2])
             with col_metrics:
-                st.metric("Alpha Score v16.0", f"{score}/100", help="Score changes based on selected Strategy Mode")
+                st.metric("Active Score", f"{score}/100", help="Score based on currently selected Strategy")
                 st.table(pd.DataFrame(list(log.items()), columns=["Metric", "Value / Weight"]))
                 
                 if st.button("⭐ Log to Cloud Watchlist"):
-                    success = add_log_to_sheet(tick, score, raw_metrics, scores_db)
+                    # Pass the 'score' (Active Score) just for display, but function won't save it to generic column
+                    success = add_log_to_sheet(tick, raw_metrics, scores_db)
                     if success:
                         st.success(f"Logged {tick} to Cloud!")
                         st.session_state.watchlist_df = get_watchlist_data()
@@ -434,9 +407,11 @@ with t1:
         else:
             st.error("Data Unavailable.")
 
-# --- TAB 2: WATCHLIST TRENDS ---
+# --- TAB 2: WATCHLIST TRENDS (UPDATED) ---
 with t2:
     st.header("My Watchlist Trends")
+    st.caption("Visualizing Strategy Scores over time.")
+    
     df_wl = st.session_state.watchlist_df
     
     if df_wl.empty or 'Ticker' not in df_wl.columns:
@@ -447,23 +422,36 @@ with t2:
             history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
             latest = history.iloc[-1]
             
-            c_info, c_plot, c_del = st.columns([1, 2, 0.5])
-            with c_info:
-                st.subheader(t)
-                st.metric("Logged Score", f"{latest['Score']}/100", f"Date: {latest['Date']}")
-            with c_plot:
+            st.subheader(f"{t} Analysis")
+            
+            # 1. Multi-Line Graph of Scores
+            score_cols = [c for c in history.columns if 'Score (' in c]
+            if not score_cols:
+                st.warning("No strategy scores found in data.")
+            else:
                 if len(history) > 1:
-                    fig = px.line(history, x='Date', y='Score', title=f"{t} Score Trend", markers=True)
-                    fig.update_layout(height=150, margin=dict(l=0,r=0,t=30,b=0))
+                    fig = px.line(history, x='Date', y=score_cols, title=f"{t} Strategy Scores Over Time", markers=True)
+                    fig.update_layout(height=300, yaxis_title="Score (0-100)", legend_title="Strategy")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.caption("Not enough history for trend.")
+                    st.caption(f"Logged: {latest['Date']}. Add more data points to see the graph.")
+            
+            # 2. Latest Data Grid
+            c_metrics, c_del = st.columns([4, 1])
+            with c_metrics:
+                # Show latest values for the 4 scores
+                cols = st.columns(4)
+                if 'Score (Balanced)' in latest: cols[0].metric("Balanced", int(latest['Score (Balanced)']))
+                if 'Score (Aggressive)' in latest: cols[1].metric("Aggressive", int(latest['Score (Aggressive)']))
+                if 'Score (Defensive)' in latest: cols[2].metric("Defensive", int(latest['Score (Defensive)']))
+                if 'Score (Speculative)' in latest: cols[3].metric("Speculative", int(latest['Score (Speculative)']))
+            
             with c_del:
-                st.write("") 
-                if st.button("🗑️", key=f"del_{t}"):
+                if st.button("🗑️ Delete All", key=f"del_{t}"):
                     remove_ticker_from_sheet(t)
                     st.session_state.watchlist_df = get_watchlist_data()
                     st.rerun()
+            
             st.divider()
 
 # --- TAB 3: SECTORS ---
