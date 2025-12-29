@@ -460,34 +460,81 @@ with t1:
         else:
             st.error("Data Unavailable.")
 
+# --- TAB 2: WATCHLIST TRENDS (UPDATED WITH REFRESH) ---
 with t2:
-    st.header("Watchlist Trends")
+    st.header("My Watchlist Trends")
+    st.caption("Visualizing Strategy Scores over time.")
+    st.info("⚠️ API LIMIT: Updating a stock uses 4 API calls. On the Free Tier (5 calls/min), please wait ~60 seconds between updates.")
+    
     df_wl = st.session_state.watchlist_df
+    
     if df_wl.empty or 'Ticker' not in df_wl.columns:
-        st.info("Watchlist is empty.")
+        st.info("Watchlist is empty. Analyze a stock to add it.")
     else:
         unique_list = df_wl['Ticker'].unique()
         for t in unique_list:
             history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
             latest = history.iloc[-1]
+            
             st.subheader(f"{t} Analysis")
             
+            # 1. Multi-Line Graph
             score_cols = [c for c in history.columns if 'Score (' in c]
             if score_cols and len(history) > 1:
                 fig = px.line(history, x='Date', y=score_cols, markers=True)
                 fig.update_layout(height=300, yaxis_title="Score")
                 st.plotly_chart(fig, use_container_width=True)
             
-            cols = st.columns(4)
-            if 'Score (Balanced)' in latest: cols[0].metric("Balanced", int(latest['Score (Balanced)']))
-            if 'Score (Aggressive)' in latest: cols[1].metric("Aggressive", int(latest['Score (Aggressive)']))
-            if 'Score (Defensive)' in latest: cols[2].metric("Defensive", int(latest['Score (Defensive)']))
-            if 'Score (Speculative)' in latest: cols[3].metric("Speculative", int(latest['Score (Speculative)']))
+            # 2. Latest Data Grid
+            c_metrics, c_actions = st.columns([4, 1])
+            with c_metrics:
+                cols = st.columns(4)
+                if 'Score (Balanced)' in latest: cols[0].metric("Balanced", int(latest['Score (Balanced)']))
+                if 'Score (Aggressive)' in latest: cols[1].metric("Aggressive", int(latest['Score (Aggressive)']))
+                if 'Score (Defensive)' in latest: cols[2].metric("Defensive", int(latest['Score (Defensive)']))
+                if 'Score (Speculative)' in latest: cols[3].metric("Speculative", int(latest['Score (Speculative)']))
+                st.caption(f"Last Logged: {latest['Date']}")
             
-            if st.button("🗑️ Delete All", key=f"del_{t}"):
-                remove_ticker_from_sheet(t)
-                st.session_state.watchlist_df = get_watchlist_data()
-                st.rerun()
+            with c_actions:
+                # UPDATE BUTTON
+                if st.button(f"🔄 Update", key=f"upd_{t}"):
+                    with st.spinner(f"Fetching fresh data for {t}..."):
+                        # 1. Fetch Data
+                        hist, ov, cf, bs = get_alpha_data(t, key)
+                        if not hist.empty and ov:
+                            # 2. Recalculate ALL Scores
+                            # We use 'Aggressive' mode for the base calculator just to get the 'raw_metrics' 
+                            # (Revenue, Margins, PEG) populated in a standard way.
+                            _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
+                            
+                            # Calculate the 4 Profiles
+                            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
+                            s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
+                            
+                            # Defensive needs its own run for FCF check
+                            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive")
+                            
+                            # Speculative needs its own run for 50MA check
+                            s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+                            
+                            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
+                            
+                            # 3. Save to Sheet
+                            success = add_log_to_sheet(t, raw_metrics, scores_db)
+                            if success:
+                                st.success(f"Updated {t}!")
+                                st.session_state.watchlist_df = get_watchlist_data()
+                                time.sleep(1) # Short pause before reload
+                                st.rerun()
+                        else:
+                            st.error("API Limit Reached or Data Error. Try again in 60s.")
+                
+                # DELETE BUTTON
+                if st.button("🗑️ Delete", key=f"del_{t}"):
+                    remove_ticker_from_sheet(t)
+                    st.session_state.watchlist_df = get_watchlist_data()
+                    st.rerun()
+            
             st.divider()
 
 with t3:
