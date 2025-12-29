@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v13.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v14.0", layout="wide")
 
 # (Note: Hardcoded API Key removed for security)
 
@@ -98,7 +98,6 @@ def get_alpha_data(ticker, api_key):
     
     # --- UPDATED TO 'ADJUSTED' TO FIX DIVIDEND DROPS ---
     try:
-        # Switch from TIME_SERIES_DAILY to TIME_SERIES_DAILY_ADJUSTED
         r_price = requests.get(f"{base}?function=TIME_SERIES_DAILY_ADJUSTED&symbol={ticker}&outputsize=full&apikey={api_key}").json()
         ts = r_price.get('Time Series (Daily)', {})
         if ts:
@@ -107,12 +106,10 @@ def get_alpha_data(ticker, api_key):
             df.index = pd.to_datetime(df.index)
             df = df.sort_index()
             
-            # IMPORTANT: Rename '5. adjusted close' to 'close' so the rest of your app works
-            # This column accounts for dividends/splits
+            # Rename '5. adjusted close' to 'close'
             if '5. adjusted close' in df.columns:
                 df = df.rename(columns={'5. adjusted close': 'close'})
             else:
-                # Fallback if adjusted isn't present for some reason
                 df = df.rename(columns={'4. close': 'close'})
                 
         else: df = pd.DataFrame()
@@ -146,7 +143,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V2.1 - DYNAMIC WEIGHTS)
+# 4. SCORING ENGINE (V3.0 - Position + Velocity)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -161,7 +158,7 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
 
 def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     """
-    Alpha Score v2.1: Dynamic Weighting based on Market Regime
+    Alpha Score v3.0: Integrated Position & Velocity Momentum
     """
     earned, possible = 0, 0
     log = {}
@@ -199,61 +196,46 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM - Split into Position (50%) and Velocity (50%)
-    # Total Momentum Base Score is out of 20 (10 for Position, 10 for Slope)
-    
+    # 5. MOMENTUM (New: Position + Velocity)
+    # We require ~265 days for valid 3-month slope of a 200MA
     mom_score = 0
     mom_label = "N/A"
     
     if not price_df.empty and len(price_df) > 265:
-        # We need ~265 days: 200 for the first MA, + 65 for the 3-month lookback
-        
         # --- A. POSITION (10 Pts) ---
-        # Where is price relative to the safety net?
         curr_price = price_df['close'].iloc[-1]
         ma_200_now = price_df['close'].rolling(window=200).mean().iloc[-1]
         
         pos_score = 0
+        pct_above = 0
         if pd.notna(ma_200_now):
             pct_above = ((curr_price / ma_200_now) - 1) * 100
-            
-            # Logic: <0% (Bad) -> 0 pts. 0-20% (Good) -> 10 pts. >25% (Parabolic) -> Penalty.
             if pct_above < 0:
                 pos_score = 0
             elif 0 <= pct_above <= 25:
                 pos_score = 10
             else:
-                # Penalty: Lose 0.5 pts for every 1% over 25%
                 penalty = (pct_above - 25) * 0.5
                 pos_score = max(0, 10 - penalty)
         
         # --- B. VELOCITY (10 Pts) ---
-        # Is the safety net itself rising or falling? (3-Month Slope)
         # 63 trading days approx = 3 months
         ma_200_old = price_df['close'].rolling(window=200).mean().iloc[-63]
         
         slope_score = 0
         slope_pct = 0
         if pd.notna(ma_200_old) and ma_200_old > 0:
-            # Calculate % change of the MA itself
             slope_pct = ((ma_200_now - ma_200_old) / ma_200_old) * 100
-            
-            # Gradient Scoring:
-            # < 0% (Falling): 0 pts
-            # 0% - 5% (Rising): Scale linearly (5% rise in MA over 3mo is HUGE)
-            # > 5% (Maxed): 10 pts
             
             if slope_pct <= 0:
                 slope_score = 0
             else:
-                # Linear scale: 2.5% slope = 5 pts. 5% slope = 10 pts.
+                # 5% slope = 10 pts
                 slope_score = (slope_pct / 5) * 10
-                slope_score = min(10, slope_score) # Cap at 10
+                slope_score = min(10, slope_score)
         
         # --- COMBINE ---
         total_base = pos_score + slope_score # Max 20
-        
-        # Formatting the label for the log
         trend_status = "Falling" if slope_pct < 0 else "Flat" if slope_pct < 1 else "Rising"
         mom_label = f"Pos: {pct_above:+.1f}% / Slope: {slope_pct:+.1f}% ({trend_status})"
         mom_score = total_base
@@ -263,6 +245,10 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
         mom_score = 0
 
     log["Momentum"] = process_metric("Trend", mom_label, 'momentum', mom_score)
+
+    # Final Score
+    score = int((earned/possible)*100) if possible > 0 else 0
+    return score, log
 
 # ==========================================
 # 5. UI HELPERS & PLOTTING
@@ -289,7 +275,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v13.0 (Regime-Based)")
+st.title("🦅 Alpha Pro v14.0 (Trend Optimized)")
 
 with st.sidebar:
     st.header("Settings")
@@ -362,7 +348,7 @@ with t1:
             col_metrics, col_chart = st.columns([1, 2])
             
             with col_metrics:
-                st.metric("Alpha Score v2.1", f"{score}/100", help="Score changes based on selected Strategy Mode")
+                st.metric("Alpha Score v3.0", f"{score}/100", help="Score changes based on selected Strategy Mode")
                 st.table(pd.DataFrame(list(log.items()), columns=["Metric", "Value / Weight"]))
                 
                 if st.button("⭐ Log to Cloud Watchlist"):
