@@ -199,34 +199,70 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM (With Parabolic Penalty)
-    pct_diff = None
-    base_pts = 0
-    if not price_df.empty and len(price_df) > 200:
-        curr_price = price_df['close'].iloc[-1]
-        ma_200 = price_df['close'].rolling(window=200).mean().iloc[-1]
-        pct_diff = ((curr_price / ma_200) - 1) * 100
+    # 5. MOMENTUM - Split into Position (50%) and Velocity (50%)
+    # Total Momentum Base Score is out of 20 (10 for Position, 10 for Slope)
+    
+    mom_score = 0
+    mom_label = "N/A"
+    
+    if not price_df.empty and len(price_df) > 265:
+        # We need ~265 days: 200 for the first MA, + 65 for the 3-month lookback
         
-        if pct_diff < 0:
-            base_pts = 0
-            note = "Downtrend"
-        elif 0 <= pct_diff <= 25:
-            base_pts = 20
-            note = "Healthy Trend"
-        else:
-            # PARABOLIC PENALTY
-            penalty = (pct_diff - 25) * 0.5 
-            base_pts = max(0, 20 - penalty)
-            note = "⚠️ Overheated"
+        # --- A. POSITION (10 Pts) ---
+        # Where is price relative to the safety net?
+        curr_price = price_df['close'].iloc[-1]
+        ma_200_now = price_df['close'].rolling(window=200).mean().iloc[-1]
+        
+        pos_score = 0
+        if pd.notna(ma_200_now):
+            pct_above = ((curr_price / ma_200_now) - 1) * 100
+            
+            # Logic: <0% (Bad) -> 0 pts. 0-20% (Good) -> 10 pts. >25% (Parabolic) -> Penalty.
+            if pct_above < 0:
+                pos_score = 0
+            elif 0 <= pct_above <= 25:
+                pos_score = 10
+            else:
+                # Penalty: Lose 0.5 pts for every 1% over 25%
+                penalty = (pct_above - 25) * 0.5
+                pos_score = max(0, 10 - penalty)
+        
+        # --- B. VELOCITY (10 Pts) ---
+        # Is the safety net itself rising or falling? (3-Month Slope)
+        # 63 trading days approx = 3 months
+        ma_200_old = price_df['close'].rolling(window=200).mean().iloc[-63]
+        
+        slope_score = 0
+        slope_pct = 0
+        if pd.notna(ma_200_old) and ma_200_old > 0:
+            # Calculate % change of the MA itself
+            slope_pct = ((ma_200_now - ma_200_old) / ma_200_old) * 100
+            
+            # Gradient Scoring:
+            # < 0% (Falling): 0 pts
+            # 0% - 5% (Rising): Scale linearly (5% rise in MA over 3mo is HUGE)
+            # > 5% (Maxed): 10 pts
+            
+            if slope_pct <= 0:
+                slope_score = 0
+            else:
+                # Linear scale: 2.5% slope = 5 pts. 5% slope = 10 pts.
+                slope_score = (slope_pct / 5) * 10
+                slope_score = min(10, slope_score) # Cap at 10
+        
+        # --- COMBINE ---
+        total_base = pos_score + slope_score # Max 20
+        
+        # Formatting the label for the log
+        trend_status = "Falling" if slope_pct < 0 else "Flat" if slope_pct < 1 else "Rising"
+        mom_label = f"Pos: {pct_above:+.1f}% / Slope: {slope_pct:+.1f}% ({trend_status})"
+        mom_score = total_base
+
     else:
-        note = "No Data"
+        mom_label = "Insufficient History"
+        mom_score = 0
 
-    val_str = f"{pct_diff:+.1f}% ({note})" if pct_diff is not None else None
-    log["vs 200-Day MA"] = process_metric("Momentum", val_str, 'momentum', base_pts)
-
-    # Final Score
-    score = int((earned/possible)*100) if possible > 0 else 0
-    return score, log
+    log["Momentum"] = process_metric("Trend", mom_label, 'momentum', mom_score)
 
 # ==========================================
 # 5. UI HELPERS & PLOTTING
