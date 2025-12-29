@@ -191,17 +191,26 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     # Helper to clean up logic
     def process_metric(label, raw_val, weight_key, base_score):
         nonlocal earned, possible
+        
         # Store for external use
         base_scores[weight_key] = base_score
         
         w = weights[weight_key]
+        
         if raw_val is not None:
+            # Standard Calculation
             weighted_points = (base_score / 20) * w
             earned += weighted_points
             possible += w
             return f"{raw_val} ({weighted_points:.1f}/{w})"
         else:
-            return "N/A"
+            # --- MISSING DATA PENALTY ---
+            # Treat N/A as 0 points, but count it towards the 'possible' total.
+            # This ensures missing data drags the score DOWN (e.g. 80/100)
+            # instead of being ignored (e.g. 80/80).
+            earned += 0
+            possible += w
+            return f"N/A (0.0/{w})"
 
     # 1. GROWTH
     rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
@@ -244,7 +253,7 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
             if pct_diff < 0: pos_score = 0
             elif 0 <= pct_diff <= 25: pos_score = 10
             else: 
-                # Parabolic Penalty with Winner's Floor (max 5)
+                # Parabolic Penalty with Winner's Floor
                 penalty = (pct_diff - 25) * 0.5
                 pos_score = max(5, 10 - penalty)
         
@@ -263,7 +272,7 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
         trend_status = "Falling" if (slope_pct or 0) < 0 else "Flat" if (slope_pct or 0) < 1 else "Rising"
         val_str = f"Pos: {pct_diff:+.1f}% / Slope: {slope_pct:+.1f}% ({trend_status})"
     else:
-        val_str = "Insufficient History"
+        val_str = None # Triggers N/A Penalty
         base_pts = 0
 
     raw_metrics['Mom Position'] = pct_diff
