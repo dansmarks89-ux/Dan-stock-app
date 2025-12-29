@@ -55,6 +55,7 @@ def get_watchlist_data():
 def add_log_to_sheet(ticker, raw_metrics, scores_dict):
     try:
         existing_df = get_watchlist_data()
+        
         new_data = {
             "Ticker": ticker,
             "Date": datetime.now().strftime("%Y-%m-%d"),
@@ -63,13 +64,19 @@ def add_log_to_sheet(ticker, raw_metrics, scores_dict):
             "FCF Yield": raw_metrics.get('FCF Yield'),
             "ROE": raw_metrics.get('ROE'),
             "PEG": raw_metrics.get('PEG'),
+            
+            # --- FIXED SECTION ---
             "Mom Position %": raw_metrics.get('Mom Position'),
+            "Mom Slope %": raw_metrics.get('Mom Slope'), # <--- THIS LINE WAS MISSING
             "RVOL": raw_metrics.get('RVOL'),
+            # ---------------------
+            
             "Score (Balanced)": scores_dict.get('Balanced'),
             "Score (Aggressive)": scores_dict.get('Aggressive'),
             "Score (Defensive)": scores_dict.get('Defensive'),
             "Score (Speculative)": scores_dict.get('Speculative')
         }
+        
         new_row = pd.DataFrame([new_data])
         updated_df = pd.concat([existing_df, new_row], ignore_index=True)
         conn.update(worksheet="Sheet1", data=updated_df)
@@ -380,7 +387,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v18.0 (Solvency + FCF)")
+st.title("🦅 Alpha Pro v18.0")
 
 with st.sidebar:
     st.header("Settings")
