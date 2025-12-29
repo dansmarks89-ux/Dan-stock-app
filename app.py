@@ -193,10 +193,7 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
         nonlocal earned, possible
         # Store for external use
         base_scores[weight_key] = base_score
-        if raw_val is not None:
-            # Strip string chars if needed for raw storage? No, keep logic simple.
-            pass 
-            
+        
         w = weights[weight_key]
         if raw_val is not None:
             weighted_points = (base_score / 20) * w
@@ -247,8 +244,9 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
             if pct_diff < 0: pos_score = 0
             elif 0 <= pct_diff <= 25: pos_score = 10
             else: 
+                # Parabolic Penalty with Winner's Floor (max 5)
                 penalty = (pct_diff - 25) * 0.5
-                pos_score = max(0, 10 - penalty)
+                pos_score = max(5, 10 - penalty)
         
         # B. Velocity
         ma_200_old = price_df['close'].rolling(window=200).mean().iloc[-63]
