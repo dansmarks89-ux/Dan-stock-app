@@ -197,7 +197,6 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
     # 5. MOMENTUM (New: Position + Velocity)
-    # We require ~265 days for valid 3-month slope of a 200MA
     mom_score = 0
     mom_label = "N/A"
     
@@ -219,7 +218,6 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
                 pos_score = max(0, 10 - penalty)
         
         # --- B. VELOCITY (10 Pts) ---
-        # 63 trading days approx = 3 months
         ma_200_old = price_df['close'].rolling(window=200).mean().iloc[-63]
         
         slope_score = 0
@@ -230,12 +228,11 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
             if slope_pct <= 0:
                 slope_score = 0
             else:
-                # 5% slope = 10 pts
                 slope_score = (slope_pct / 5) * 10
                 slope_score = min(10, slope_score)
         
         # --- COMBINE ---
-        total_base = pos_score + slope_score # Max 20
+        total_base = pos_score + slope_score 
         trend_status = "Falling" if slope_pct < 0 else "Flat" if slope_pct < 1 else "Rising"
         mom_label = f"Pos: {pct_above:+.1f}% / Slope: {slope_pct:+.1f}% ({trend_status})"
         mom_score = total_base
@@ -280,18 +277,16 @@ st.title("🦅 Alpha Pro v14.0 (Trend Optimized)")
 with st.sidebar:
     st.header("Settings")
     
-    # --- AUTOMATIC KEY LOADING (NO TEXT BOX) ---
+    # --- AUTOMATIC KEY LOADING ---
     if "AV_KEY" in st.secrets:
         key = st.secrets["AV_KEY"]
     else:
         key = ""
         st.warning("⚠️ AV_KEY missing in Secrets")
-    # ------------------------------------------
     
     st.subheader("🧠 Strategy Mode")
     strategy = st.radio("Market Phase", ["Balanced (Default)", "Aggressive Growth", "Defensive Value"])
     
-    # Define Weights based on selection
     if "Growth" in strategy:
         active_weights = {'growth': 35, 'momentum': 30, 'margins': 15, 'roe': 10, 'value': 10}
         st.caption("🚀 Focus: High Growth, Uptrends.")
@@ -302,7 +297,6 @@ with st.sidebar:
         active_weights = {'growth': 20, 'momentum': 20, 'margins': 20, 'roe': 20, 'value': 20}
         st.caption("⚖️ Focus: All-Weather Blend.")
 
-    # Init watchlist state
     if 'watchlist_df' not in st.session_state:
         st.session_state.watchlist_df = get_watchlist_data()
     
@@ -327,17 +321,29 @@ with t1:
             with st.spinner("Calculating Historical P/E..."):
                 pe_hist = get_historical_pe(tick, key, hist)
             
+            # --- GET LATEST PRICE & DELTA ---
+            curr_price = hist['close'].iloc[-1]
+            # Calculate daily change if possible
+            if len(hist) > 1:
+                prev_price = hist['close'].iloc[-2]
+                day_delta = curr_price - prev_price
+            else:
+                day_delta = 0
+            
             # Header Metrics
             pe_now = safe_float(ov.get('ForwardPE', 0))
             sec = ov.get('Sector', 'Unknown')
             sec_avg = SECTOR_PE_BENCHMARKS.get(sec.upper(), 20.0)
             
             st.markdown(f"## {tick} - {ov.get('Name')}")
-            k1, k2, k3, k4 = st.columns(4)
+            
+            # UPDATED COLUMNS: 5 Columns now (Price added first)
+            k0, k1, k2, k3, k4 = st.columns(5)
+            
+            k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
             k2.metric("Div Yield", f"{(safe_float(ov.get('DividendYield', 0)) or 0) * 100:.2f}%")
             
-            # Safe P/E Logic
             if pe_now is not None:
                 k3.metric("Fwd P/E", f"{pe_now:.2f}")
                 k4.metric("Sector Avg P/E", sec_avg, delta=f"{sec_avg - pe_now:.1f}")
