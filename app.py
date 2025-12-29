@@ -195,7 +195,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
     log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
-    # 2. PROFITABILITY
+    # 2. PROFITABILITY (Margin vs FCF Yield)
     margin = safe_float(overview.get('ProfitMargin'))
     base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
     raw_metrics['Profit Margin'] = margin * 100 if margin else None
@@ -228,11 +228,37 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
     log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # 4. VALUE
-    peg = safe_float(overview.get('PEGRatio'))
-    raw_metrics['PEG'] = peg
-    base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
-    log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
+    # 4. VALUE (ADAPTIVE: EV/Sales, EV/EBITDA, or PEG)
+    val_label = "PEG"
+    val_raw = None
+    base_val_pts = 0
+    
+    # A. Aggressive: Use EV/Sales (Price-to-Sales logic but accounting for debt)
+    if mode == "Aggressive":
+        val_label = "EV/Sales"
+        ev_rev = safe_float(overview.get('EVToRevenue'))
+        val_raw = ev_rev
+        # Scale: <3.0 is Cheap (20pts), >12.0 is Expensive (0pts)
+        base_val_pts = get_points(ev_rev, 3.0, 12.0, 20, False) if ev_rev else 0
+
+    # B. Defensive: Use EV/EBITDA (The "Banker's Metric")
+    elif mode == "Defensive":
+        val_label = "EV/EBITDA"
+        ev_ebitda = safe_float(overview.get('EVToEBITDA'))
+        val_raw = ev_ebitda
+        # Scale: <8.0 is Cheap (20pts), >18.0 is Expensive (0pts)
+        base_val_pts = get_points(ev_ebitda, 8.0, 18.0, 20, False) if ev_ebitda else 0
+
+    # C. Balanced/Speculative: Default to PEG
+    else:
+        val_label = "PEG"
+        peg = safe_float(overview.get('PEGRatio'))
+        val_raw = peg
+        # Scale: <1.0 is Cheap (20pts), >2.5 is Expensive (0pts)
+        base_val_pts = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
+
+    raw_metrics['PEG'] = val_raw # Storing raw value in PEG column for now (or rename col in DB later)
+    log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
 
     # 5. MOMENTUM
     pct_diff, slope_pct, rvol = None, None, None
