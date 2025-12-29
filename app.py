@@ -34,10 +34,9 @@ SECTOR_PE_BENCHMARKS = {
 }
 
 # --- STRATEGY WEIGHTS ---
-# Note: 'profitability' slot will toggle between Margin and FCF Yield based on mode
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'profitability': 10, 'roe': 5, 'value': 5}
-WEIGHTS_DEFENSIVE = {'growth': 5, 'momentum': 35, 'profitability': 0, 'roe': 20, 'value': 40} # Profitability set to 0 here because we handle FCF specifically in logic
+WEIGHTS_DEFENSIVE = {'growth': 5, 'momentum': 35, 'profitability': 0, 'roe': 20, 'value': 40} 
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
 # ==========================================
@@ -105,11 +104,11 @@ def get_alpha_data(ticker, api_key):
     try: r_ov = requests.get(f"{base}?function=OVERVIEW&symbol={ticker}&apikey={api_key}").json()
     except: r_ov = {}
 
-    # 2. Cash Flow (Needed for FCF)
+    # 2. Cash Flow
     try: r_cf = requests.get(f"{base}?function=CASH_FLOW&symbol={ticker}&apikey={api_key}").json()
     except: r_cf = {}
     
-    # 3. Balance Sheet (Needed for Debt/Equity)
+    # 3. Balance Sheet
     try: r_bs = requests.get(f"{base}?function=BALANCE_SHEET&symbol={ticker}&apikey={api_key}").json()
     except: r_bs = {}
 
@@ -125,7 +124,6 @@ def get_alpha_data(ticker, api_key):
             if '5. adjusted close' in df.columns: df = df.rename(columns={'5. adjusted close': 'close'})
             else: df = df.rename(columns={'4. close': 'close'})
             
-            # Need volume for RVOL
             if '6. volume' in df.columns: df = df.rename(columns={'6. volume': 'volume'})
             elif '5. volume' in df.columns: df = df.rename(columns={'5. volume': 'volume'})
         else: df = pd.DataFrame()
@@ -135,17 +133,12 @@ def get_alpha_data(ticker, api_key):
 
 @st.cache_data(ttl=3600)
 def get_historical_pe(ticker, api_key, price_df):
-    """Calculates Daily P/E Ratio History."""
     if price_df.empty: return pd.DataFrame()
-    
-    # Define base URL locally to prevent NameError
-    base = "https://www.alphavantage.co/query" 
-    
+    base = "https://www.alphavantage.co/query"
     try:
         url = f"{base}?function=EARNINGS&symbol={ticker}&apikey={api_key}"
         data = requests.get(url).json()
         q_earnings = data.get('quarterlyEarnings', [])
-        
         if not q_earnings: return pd.DataFrame()
         
         eps_df = pd.DataFrame(q_earnings)
@@ -155,17 +148,14 @@ def get_historical_pe(ticker, api_key, price_df):
         
         eps_df['ttm_eps'] = eps_df['reportedEPS'].rolling(window=4).sum()
         
-        # Merge Price with Earnings
         merged = pd.merge_asof(price_df, eps_df['ttm_eps'], left_index=True, right_index=True, direction='backward')
         merged['pe_ratio'] = merged['close'] / merged['ttm_eps']
-        
-        # Filter outliers
         merged = merged[(merged['pe_ratio'] > 0) & (merged['pe_ratio'] < 300)]
         return merged[['pe_ratio']]
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V18 - FCF & RVOL)
+# 4. SCORING ENGINE (V18)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -179,9 +169,6 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
         return round(((worst - val)/(worst - best)) * max_pts, 1)
 
 def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weights, use_50ma=False, mode="Balanced"):
-    """
-    Returns: Final Score (int), Log (dict), Raw Metrics (dict), Base Scores (dict)
-    """
     earned, possible = 0, 0
     log = {}
     raw_metrics = {}
@@ -208,17 +195,14 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
     log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
-    # 2. PROFITABILITY (Margin OR FCF Yield)
-    # A. Calculate Net Margin
+    # 2. PROFITABILITY
     margin = safe_float(overview.get('ProfitMargin'))
     base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
     raw_metrics['Profit Margin'] = margin * 100 if margin else None
 
-    # B. Calculate FCF Yield
     fcf_yield = None
     base_fcf = 0
     try:
-        # Get latest Annual Reports for FCF
         annual_reports = cash_flow.get('annualReports', [])
         if annual_reports:
             latest = annual_reports[0]
@@ -228,33 +212,29 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             if ocf and capex and mcap:
                 fcf = ocf - capex
                 fcf_yield = (fcf / mcap) * 100
-                # FCF Scoring: >5% is great, <0% is bad
                 base_fcf = get_points(fcf_yield, 5.0, 0.0, 20, True)
     except: pass
     raw_metrics['FCF Yield'] = fcf_yield
 
-    # C. Decide which to use based on Mode
     if mode == "Defensive":
-        # Use FCF for Defensive
         log["Profitability"] = process_metric("FCF Yield", f"{fcf_yield:.1f}%" if fcf_yield is not None else None, 'profitability', base_fcf)
     else:
-        # Use Margin for Aggressive/Balanced/Spec
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # 3. QUALITY (ROE)
+    # 3. QUALITY
     roe = safe_float(overview.get('ReturnOnEquityTTM'))
     if roe and roe < 5: roe = roe * 100 
     raw_metrics['ROE'] = roe
     base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
     log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # 4. VALUE (PEG)
+    # 4. VALUE
     peg = safe_float(overview.get('PEGRatio'))
     raw_metrics['PEG'] = peg
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM (Price + Slope + RVOL)
+    # 5. MOMENTUM
     pct_diff, slope_pct, rvol = None, None, None
     base_pts = 0
     
@@ -265,7 +245,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     val_str = "N/A"
     
     if not price_df.empty and len(price_df) > required_history:
-        # A. Position
         curr_price = price_df['close'].iloc[-1]
         ma_now = price_df['close'].rolling(window=ma_window).mean().iloc[-1]
         pos_score = 0
@@ -277,7 +256,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                 penalty = (pct_diff - 25) * 0.5
                 pos_score = max(5, 10 - penalty)
         
-        # B. Slope
         ma_old = price_df['close'].rolling(window=ma_window).mean().iloc[-slope_lookback]
         slope_score = 0
         if pd.notna(ma_old) and ma_old > 0:
@@ -285,8 +263,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             target_slope = 10 if use_50ma else 5
             slope_score = min(10, (slope_pct / target_slope) * 10) if slope_pct > 0 else 0
         
-        # C. RVOL (Relative Volume)
-        # Compare last 5-day avg volume vs 20-day avg volume
         try:
             vol_5 = price_df['volume'].iloc[-5:].mean()
             vol_20 = price_df['volume'].iloc[-20:].mean()
@@ -295,13 +271,12 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
 
         base_pts = pos_score + slope_score
         
-        # RVOL Bonus/Penalty
         rvol_msg = ""
         if rvol > 1.2 and slope_pct > 0: 
-            base_pts = min(20, base_pts + 2) # Bonus for High Vol Uptrend
+            base_pts = min(20, base_pts + 2) 
             rvol_msg = " + Vol Bonus"
         elif rvol < 0.6 and slope_pct > 0:
-            base_pts = max(0, base_pts - 2) # Penalty for Low Vol Uptrend
+            base_pts = max(0, base_pts - 2)
             rvol_msg = " - Low Vol"
 
         trend_status = "Falling" if (slope_pct or 0) < 0 else "Flat" if (slope_pct or 0) < 1 else "Rising"
@@ -316,8 +291,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     ma_label = "50-Day" if use_50ma else "200-Day"
     log[f"Trend ({ma_label})"] = process_metric("Momentum", val_str, 'momentum', base_pts)
 
-    # 6. SOLVENCY PENALTY (Debt/Equity)
-    # Applies to Balanced & Defensive. Aggressive/Speculative ignores it.
+    # 6. SOLVENCY PENALTY
     de_ratio = None
     penalty_mult = 1.0
     try:
@@ -329,14 +303,12 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             if liab and equity and equity > 0:
                 de_ratio = liab / equity
                 if mode in ["Balanced", "Defensive"]:
-                    if de_ratio > 5.0: penalty_mult = 0.70 # Severe distress
-                    elif de_ratio > 2.0: penalty_mult = 0.85 # High debt
+                    if de_ratio > 5.0: penalty_mult = 0.70
+                    elif de_ratio > 2.0: penalty_mult = 0.85
     except: pass
     
-    # Calculate Final
     score = int((earned/possible)*100) if possible > 0 else 0
     
-    # Apply Penalty
     if penalty_mult < 1.0:
         score = int(score * penalty_mult)
         log["Solvency Check"] = f"D/E {de_ratio:.2f} (Penalty: -{int((1-penalty_mult)*100)}%)"
@@ -344,14 +316,9 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     return score, log, raw_metrics, base_scores
 
 def compute_weighted_score(base_scores, weights):
-    # Determine implied mode from weights to handle Solvency logic if needed externally
-    # For now, simplistic mapping
     earned = 0
     possible = 0
     for key, weight in weights.items():
-        # Handle the FCF vs Margin swap abstractly
-        # If the weight calls for 'profitability', we need to know which base score to use
-        # This function acts as an approximation for the database logging
         if key in base_scores:
             pts = (base_scores[key] / 20) * weight
             earned += pts
@@ -359,7 +326,33 @@ def compute_weighted_score(base_scores, weights):
     return int((earned/possible)*100) if possible > 0 else 0
 
 # ==========================================
-# 5. MAIN APP
+# 5. UI HELPERS & PLOTTING
+# ==========================================
+def tf_selector(key_suffix):
+    c_tf = st.columns(4)
+    tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
+    choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
+    return tf_map[choice]
+
+# --- PLOT DUAL AXIS FUNCTION INSERTED HERE ---
+def plot_dual_axis(price_df, pe_df, title, days):
+    cutoff = price_df.index[-1] - timedelta(days=days)
+    p_sub = price_df[price_df.index >= cutoff]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=p_sub.index, y=p_sub['close'], name="Price ($)", line=dict(color='#00CC96', width=2)))
+    
+    if not pe_df.empty:
+        pe_sub = pe_df[pe_df.index >= cutoff]
+        if not pe_sub.empty:
+            fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
+    
+    fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig, use_container_width=True)
+# ---------------------------------------------
+
+# ==========================================
+# 6. MAIN APP
 # ==========================================
 st.title("🦅 Alpha Pro v18.0 (Solvency + FCF)")
 
@@ -414,22 +407,16 @@ with t1:
             hist, ov, cf, bs = get_alpha_data(tick, key)
             
         if not hist.empty and ov:
-            # Main Score Calculation based on ACTIVE Strategy
+            # Main Score Calculation
             score, log, raw_metrics, base_scores = calculate_dynamic_score(
                 ov, cf, bs, hist, active_weights, use_50ma=is_speculative, mode=mode_name
             )
             
-            # For Database: We must calculate specific scores for specific columns
-            # This requires running the logic slightly differently for Defensive (FCF) vs Aggressive (Margin)
-            # 1. Calc Balanced/Aggressive (Uses Margin)
+            # Database Scores
             _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
             s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
             s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-            
-            # 2. Calc Defensive (Uses FCF + Penalty)
             s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive")
-            
-            # 3. Calc Speculative (Uses 50MA)
             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
             
             scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
@@ -448,8 +435,6 @@ with t1:
             k0, k1, k2, k3, k4 = st.columns(5)
             k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
-            
-            # NEW: Short Interest instead of Put/Call
             k2.metric("Short % Float", f"{short_float*100:.2f}%" if short_float else "N/A", help="Proxy for Bearish Sentiment")
             
             if pe_now: k3.metric("P/E (TTM)", f"{pe_now:.2f}")
@@ -487,14 +472,12 @@ with t2:
             latest = history.iloc[-1]
             st.subheader(f"{t} Analysis")
             
-            # Graph
             score_cols = [c for c in history.columns if 'Score (' in c]
             if score_cols and len(history) > 1:
                 fig = px.line(history, x='Date', y=score_cols, markers=True)
                 fig.update_layout(height=300, yaxis_title="Score")
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Metrics Grid
             cols = st.columns(4)
             if 'Score (Balanced)' in latest: cols[0].metric("Balanced", int(latest['Score (Balanced)']))
             if 'Score (Aggressive)' in latest: cols[1].metric("Aggressive", int(latest['Score (Aggressive)']))
@@ -509,7 +492,6 @@ with t2:
 
 with t3:
     st.header("Sector Flows")
-    # (Sector logic remains same, just shortened for brevity in this paste)
     c_sel, c_tf = st.columns([3, 1])
     with c_sel:
         selectable = [k for k in SECTOR_ETFS.keys() if "SPY" not in k]
