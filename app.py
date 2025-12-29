@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v15.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v16.0", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -33,10 +33,20 @@ SECTOR_PE_BENCHMARKS = {
     "REAL ESTATE": 35.0
 }
 
-# Define Weights Globally for multi-score calculation
+# --- UPDATED STRATEGY WEIGHTS ---
+# 1. Balanced: The "All-Weather" Portfolio
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'margins': 20, 'roe': 20, 'value': 20}
-WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 30, 'margins': 15, 'roe': 10, 'value': 10}
-WEIGHTS_DEFENSIVE = {'growth': 10, 'momentum': 10, 'margins': 25, 'roe': 25, 'value': 30}
+
+# 2. Aggressive: Mag 7 Focus (Growth/Mom dominant, but with a 10% Quality/Value Floor)
+# Growth 40 + Mom 40 + Margin 10 + ROE 5 + Value 5 = 100
+WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'margins': 10, 'roe': 5, 'value': 5}
+
+# 3. Defensive: The "Bottom Fisher" (Value dominant, but accounts for slight growth)
+# Value 40 + Mom 35 + ROE 20 + Growth 5 = 100
+WEIGHTS_DEFENSIVE = {'growth': 5, 'momentum': 35, 'margins': 0, 'roe': 20, 'value': 40}
+
+# 4. Speculative: The "Rocket" (Hype only. Uses 50-Day MA)
+WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'margins': 0, 'roe': 0, 'value': 0}
 
 # ==========================================
 # 2. GOOGLE SHEETS DATABASE
@@ -46,10 +56,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def get_watchlist_data():
     """Reads the full history from Google Sheets."""
     try:
-        # Read ALL columns to preserve data structure
         df = conn.read(worksheet="Sheet1", ttl=0)
         df = df.dropna(subset=['Ticker'])
-        # Handle empty/new sheet case
         if 'Ticker' not in df.columns:
             return pd.DataFrame(columns=["Ticker", "Date", "Score"])
         return df
@@ -64,11 +72,10 @@ def add_log_to_sheet(ticker, active_score, raw_metrics, scores_dict):
     try:
         existing_df = get_watchlist_data()
         
-        # Construct the new row with all variables
         new_data = {
             "Ticker": ticker,
             "Date": datetime.now().strftime("%Y-%m-%d"),
-            "Score": active_score, # The score based on current strategy
+            "Score": active_score, 
             "Rev Growth": raw_metrics.get('Rev Growth'),
             "Profit Margin": raw_metrics.get('Profit Margin'),
             "ROE": raw_metrics.get('ROE'),
@@ -77,14 +84,13 @@ def add_log_to_sheet(ticker, active_score, raw_metrics, scores_dict):
             "Mom Slope %": raw_metrics.get('Mom Slope'),
             "Score (Balanced)": scores_dict.get('Balanced'),
             "Score (Aggressive)": scores_dict.get('Aggressive'),
-            "Score (Defensive)": scores_dict.get('Defensive')
+            "Score (Defensive)": scores_dict.get('Defensive'),
+            "Score (Speculative)": scores_dict.get('Speculative')
         }
         
         new_row = pd.DataFrame([new_data])
         
-        # Combine and Deduplicate (Keep Last) to ensure 1 line per stock
         if not existing_df.empty:
-            # Drop old entry for this ticker if it exists
             existing_df = existing_df[existing_df['Ticker'] != ticker]
             updated_df = pd.concat([existing_df, new_row], ignore_index=True)
         else:
@@ -166,7 +172,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE
+# 4. SCORING ENGINE (UPDATED FOR 50MA)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -179,35 +185,29 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
         if val >= worst: return 0
         return round(((worst - val)/(worst - best)) * max_pts, 1)
 
-def calculate_dynamic_score(overview, cash_flow, price_df, weights):
+def calculate_dynamic_score(overview, cash_flow, price_df, weights, use_50ma=False):
     """
     Returns: Final Score (int), Log (dict), Raw Metrics (dict), Base Scores (dict)
+    use_50ma: If True, uses 50-Day Moving Average for Momentum (Speculative Mode).
     """
     earned, possible = 0, 0
     log = {}
     raw_metrics = {}
-    base_scores = {} # Stores the 0-20 score for each category
+    base_scores = {} 
     
     # Helper to clean up logic
     def process_metric(label, raw_val, weight_key, base_score):
         nonlocal earned, possible
-        
-        # Store for external use
         base_scores[weight_key] = base_score
-        
         w = weights[weight_key]
         
         if raw_val is not None:
-            # Standard Calculation
             weighted_points = (base_score / 20) * w
             earned += weighted_points
             possible += w
             return f"{raw_val} ({weighted_points:.1f}/{w})"
         else:
-            # --- MISSING DATA PENALTY ---
-            # Treat N/A as 0 points, but count it towards the 'possible' total.
-            # This ensures missing data drags the score DOWN (e.g. 80/100)
-            # instead of being ignored (e.g. 80/80).
+            # N/A Penalty: 0 points earned, but weight remains in 'possible'
             earned += 0
             possible += w
             return f"N/A (0.0/{w})"
@@ -237,48 +237,58 @@ def calculate_dynamic_score(overview, cash_flow, price_df, weights):
     base_pts = get_points(peg, 1.0, 2.5, 20) if peg else 0
     log["PEG Ratio"] = process_metric("PEG", f"{peg:.2f}" if peg else None, 'value', base_pts)
 
-    # 5. MOMENTUM
+    # 5. MOMENTUM (Conditional: 200MA or 50MA)
     pct_diff = None
     slope_pct = None
     base_pts = 0
     
-    if not price_df.empty and len(price_df) > 265:
+    # Define MA Window based on mode
+    ma_window = 50 if use_50ma else 200
+    slope_lookback = 22 if use_50ma else 63 # 22 days ~1 month for 50MA, 63 days ~3 mo for 200MA
+    required_history = ma_window + slope_lookback + 5
+    
+    if not price_df.empty and len(price_df) > required_history:
         # A. Position
         curr_price = price_df['close'].iloc[-1]
-        ma_200_now = price_df['close'].rolling(window=200).mean().iloc[-1]
+        ma_now = price_df['close'].rolling(window=ma_window).mean().iloc[-1]
         
         pos_score = 0
-        if pd.notna(ma_200_now):
-            pct_diff = ((curr_price / ma_200_now) - 1) * 100
+        if pd.notna(ma_now):
+            pct_diff = ((curr_price / ma_now) - 1) * 100
             if pct_diff < 0: pos_score = 0
             elif 0 <= pct_diff <= 25: pos_score = 10
             else: 
-                # Parabolic Penalty with Winner's Floor
+                # Parabolic Penalty (Max 5 floor)
                 penalty = (pct_diff - 25) * 0.5
                 pos_score = max(5, 10 - penalty)
         
         # B. Velocity
-        ma_200_old = price_df['close'].rolling(window=200).mean().iloc[-63]
+        ma_old = price_df['close'].rolling(window=ma_window).mean().iloc[-slope_lookback]
         slope_score = 0
-        if pd.notna(ma_200_old) and ma_200_old > 0:
-            slope_pct = ((ma_200_now - ma_200_old) / ma_200_old) * 100
+        if pd.notna(ma_old) and ma_old > 0:
+            slope_pct = ((ma_now - ma_old) / ma_old) * 100
             if slope_pct <= 0: slope_score = 0
             else:
-                slope_score = min(10, (slope_pct / 5) * 10)
+                # 50MA moves faster, so we expect steeper slopes. 
+                # Target 10% slope for 50MA, 5% for 200MA to get full points.
+                target_slope = 10 if use_50ma else 5
+                slope_score = min(10, (slope_pct / target_slope) * 10)
         
         base_pts = pos_score + slope_score
         
         # For Log Label
+        ma_label = "50-Day" if use_50ma else "200-Day"
         trend_status = "Falling" if (slope_pct or 0) < 0 else "Flat" if (slope_pct or 0) < 1 else "Rising"
         val_str = f"Pos: {pct_diff:+.1f}% / Slope: {slope_pct:+.1f}% ({trend_status})"
     else:
-        val_str = None # Triggers N/A Penalty
+        val_str = None
         base_pts = 0
+        ma_label = "MA Data"
 
     raw_metrics['Mom Position'] = pct_diff
     raw_metrics['Mom Slope'] = slope_pct
     
-    log["vs 200-Day MA"] = process_metric("Momentum", val_str, 'momentum', base_pts)
+    log[f"vs {ma_label} MA"] = process_metric("Momentum", val_str, 'momentum', base_pts)
 
     score = int((earned/possible)*100) if possible > 0 else 0
     return score, log, raw_metrics, base_scores
@@ -289,7 +299,6 @@ def compute_weighted_score(base_scores, weights):
     possible = 0
     for key, weight in weights.items():
         if key in base_scores:
-            # base score is 0-20. Scale to weight.
             pts = (base_scores[key] / 20) * weight
             earned += pts
             possible += weight
@@ -318,7 +327,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v15.0 (Cloud Database)")
+st.title("🦅 Alpha Pro v16.0 (Versatile Edition)")
 
 with st.sidebar:
     st.header("Settings")
@@ -329,14 +338,21 @@ with st.sidebar:
         st.warning("⚠️ AV_KEY missing in Secrets")
     
     st.subheader("🧠 Strategy Mode")
-    strategy = st.radio("Market Phase", ["Balanced (Default)", "Aggressive Growth", "Defensive Value"])
+    strategy = st.radio("Market Phase", ["Balanced", "Aggressive Growth", "Defensive / Cyclical", "Speculative / Hype"])
     
-    if "Growth" in strategy:
+    # Pass the 'Speculative' flag if needed
+    is_speculative = False
+    
+    if "Aggressive" in strategy:
         active_weights = WEIGHTS_AGGRESSIVE
-        st.caption("🚀 Focus: High Growth, Uptrends.")
-    elif "Value" in strategy:
+        st.caption("🚀 Focus: Mag 7 & Tech. High Growth + Profit. Low Val/Quality floor.")
+    elif "Defensive" in strategy:
         active_weights = WEIGHTS_DEFENSIVE
-        st.caption("🛡️ Focus: Cash Flow, Cheap Price.")
+        st.caption("🛡️ Focus: Deep Value & Turnarounds. High Value + Trend Reversal.")
+    elif "Speculative" in strategy:
+        active_weights = WEIGHTS_SPECULATIVE
+        is_speculative = True
+        st.caption("🎲 Focus: Penny Stocks & Hype. Uses 50-Day MA for Momentum.")
     else:
         active_weights = WEIGHTS_BALANCED
         st.caption("⚖️ Focus: All-Weather Blend.")
@@ -345,7 +361,6 @@ with st.sidebar:
         st.session_state.watchlist_df = get_watchlist_data()
     
     st.markdown("---")
-    # Safe check for unique tickers
     if not st.session_state.watchlist_df.empty and 'Ticker' in st.session_state.watchlist_df.columns:
         unique_tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
     else:
@@ -365,14 +380,15 @@ with t1:
             hist, ov, cf = get_alpha_data(tick, key)
             
         if not hist.empty and ov:
-            # Calculate metrics
-            score, log, raw_metrics, base_scores = calculate_dynamic_score(ov, cf, hist, active_weights)
+            # Calculate metrics (Pass the 50MA flag)
+            score, log, raw_metrics, base_scores = calculate_dynamic_score(ov, cf, hist, active_weights, use_50ma=is_speculative)
             
             # Calculate ALL scores for database
             scores_db = {
                 'Balanced': compute_weighted_score(base_scores, WEIGHTS_BALANCED),
                 'Aggressive': compute_weighted_score(base_scores, WEIGHTS_AGGRESSIVE),
-                'Defensive': compute_weighted_score(base_scores, WEIGHTS_DEFENSIVE)
+                'Defensive': compute_weighted_score(base_scores, WEIGHTS_DEFENSIVE),
+                'Speculative': compute_weighted_score(base_scores, WEIGHTS_SPECULATIVE)
             }
             
             with st.spinner("Calculating Historical P/E..."):
@@ -384,7 +400,8 @@ with t1:
                 day_delta = curr_price - hist['close'].iloc[-2]
             else: day_delta = 0
             
-            pe_now = safe_float(ov.get('ForwardPE', 0))
+            # Use Trailing P/E for display match
+            pe_now = safe_float(ov.get('PERatio', 0))
             sec = ov.get('Sector', 'Unknown')
             sec_avg = SECTOR_PE_BENCHMARKS.get(sec.upper(), 20.0)
             
@@ -394,15 +411,15 @@ with t1:
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
             k2.metric("Div Yield", f"{(safe_float(ov.get('DividendYield', 0)) or 0) * 100:.2f}%")
             if pe_now:
-                k3.metric("Fwd P/E", f"{pe_now:.2f}")
+                k3.metric("P/E (TTM)", f"{pe_now:.2f}")
                 k4.metric("Sector Avg P/E", sec_avg, delta=f"{sec_avg - pe_now:.1f}")
             else:
-                k3.metric("Fwd P/E", "N/A")
+                k3.metric("P/E (TTM)", "N/A")
                 k4.metric("Sector Avg P/E", sec_avg, delta=None)
             
             col_metrics, col_chart = st.columns([1, 2])
             with col_metrics:
-                st.metric("Alpha Score v3.0", f"{score}/100", help="Score changes based on selected Strategy Mode")
+                st.metric("Alpha Score v16.0", f"{score}/100", help="Score changes based on selected Strategy Mode")
                 st.table(pd.DataFrame(list(log.items()), columns=["Metric", "Value / Weight"]))
                 
                 if st.button("⭐ Log to Cloud Watchlist"):
@@ -427,14 +444,12 @@ with t2:
     else:
         unique_list = df_wl['Ticker'].unique()
         for t in unique_list:
-            # Filter history
             history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
             latest = history.iloc[-1]
             
             c_info, c_plot, c_del = st.columns([1, 2, 0.5])
             with c_info:
                 st.subheader(t)
-                # Show the score logged at that time
                 st.metric("Logged Score", f"{latest['Score']}/100", f"Date: {latest['Date']}")
             with c_plot:
                 if len(history) > 1:
