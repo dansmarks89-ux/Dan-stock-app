@@ -135,21 +135,31 @@ def get_alpha_data(ticker, api_key):
 
 @st.cache_data(ttl=3600)
 def get_historical_pe(ticker, api_key, price_df):
+    """Calculates Daily P/E Ratio History."""
     if price_df.empty: return pd.DataFrame()
-    base = "https://www.alphavantage.co/query"
+    
+    # Define base URL locally to prevent NameError
+    base = "https://www.alphavantage.co/query" 
+    
     try:
         url = f"{base}?function=EARNINGS&symbol={ticker}&apikey={api_key}"
         data = requests.get(url).json()
         q_earnings = data.get('quarterlyEarnings', [])
+        
         if not q_earnings: return pd.DataFrame()
         
         eps_df = pd.DataFrame(q_earnings)
         eps_df['fiscalDateEnding'] = pd.to_datetime(eps_df['fiscalDateEnding'])
         eps_df['reportedEPS'] = pd.to_numeric(eps_df['reportedEPS'], errors='coerce')
         eps_df = eps_df.set_index('fiscalDateEnding').sort_index()
+        
         eps_df['ttm_eps'] = eps_df['reportedEPS'].rolling(window=4).sum()
+        
+        # Merge Price with Earnings
         merged = pd.merge_asof(price_df, eps_df['ttm_eps'], left_index=True, right_index=True, direction='backward')
         merged['pe_ratio'] = merged['close'] / merged['ttm_eps']
+        
+        # Filter outliers
         merged = merged[(merged['pe_ratio'] > 0) & (merged['pe_ratio'] < 300)]
         return merged[['pe_ratio']]
     except: return pd.DataFrame()
