@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v18.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.0", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -40,7 +40,7 @@ WEIGHTS_DEFENSIVE = {'growth': 5, 'momentum': 35, 'profitability': 0, 'roe': 20,
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
 # ==========================================
-# 2. GOOGLE SHEETS DATABASE
+# 2. GOOGLE SHEETS DATABASE (FIXED)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -52,25 +52,26 @@ def get_watchlist_data():
         return df
     except: return pd.DataFrame()
 
-def add_log_to_sheet(ticker, raw_metrics, scores_dict):
+def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
     try:
         existing_df = get_watchlist_data()
         
+        # 1. Fix Timezone (UTC -> US Central approx by subtracting 6 hours)
+        # This prevents 7PM CST from logging as "Tomorrow"
+        log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+
         new_data = {
             "Ticker": ticker,
-            "Date": datetime.now().strftime("%Y-%m-%d"),
+            "Date": log_date,
+            "Price": curr_price,  # <--- NEW: Logs Price
             "Rev Growth": raw_metrics.get('Rev Growth'),
             "Profit Margin": raw_metrics.get('Profit Margin'),
             "FCF Yield": raw_metrics.get('FCF Yield'),
             "ROE": raw_metrics.get('ROE'),
             "PEG": raw_metrics.get('PEG'),
-            
-            # --- FIXED SECTION ---
             "Mom Position %": raw_metrics.get('Mom Position'),
-            "Mom Slope %": raw_metrics.get('Mom Slope'), # <--- THIS LINE WAS MISSING
+            "Mom Slope %": raw_metrics.get('Mom Slope'),
             "RVOL": raw_metrics.get('RVOL'),
-            # ---------------------
-            
             "Score (Balanced)": scores_dict.get('Balanced'),
             "Score (Aggressive)": scores_dict.get('Aggressive'),
             "Score (Defensive)": scores_dict.get('Defensive'),
@@ -78,7 +79,19 @@ def add_log_to_sheet(ticker, raw_metrics, scores_dict):
         }
         
         new_row = pd.DataFrame([new_data])
+        
+        # 2. Overwrite Logic: Enforce "One Log Per Day"
+        if not existing_df.empty:
+            # Check if entry exists for this Ticker + Date
+            mask = (existing_df['Ticker'] == ticker) & (existing_df['Date'] == log_date)
+            
+            if not existing_df[mask].empty:
+                # Remove the old entry for today so we can replace it
+                existing_df = existing_df[~mask]
+        
+        # Append the new (or updated) row
         updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+        
         conn.update(worksheet="Sheet1", data=updated_df)
         st.cache_data.clear()
         return True
@@ -152,7 +165,6 @@ def get_historical_pe(ticker, api_key, price_df):
         eps_df['fiscalDateEnding'] = pd.to_datetime(eps_df['fiscalDateEnding'])
         eps_df['reportedEPS'] = pd.to_numeric(eps_df['reportedEPS'], errors='coerce')
         eps_df = eps_df.set_index('fiscalDateEnding').sort_index()
-        
         eps_df['ttm_eps'] = eps_df['reportedEPS'].rolling(window=4).sum()
         
         merged = pd.merge_asof(price_df, eps_df['ttm_eps'], left_index=True, right_index=True, direction='backward')
@@ -162,7 +174,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V18)
+# 4. SCORING ENGINE (V19 - ADAPTIVE)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -202,7 +214,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
     log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
-    # 2. PROFITABILITY (Margin vs FCF Yield)
+    # 2. PROFITABILITY
     margin = safe_float(overview.get('ProfitMargin'))
     base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
     raw_metrics['Profit Margin'] = margin * 100 if margin else None
@@ -235,36 +247,30 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
     log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # 4. VALUE (ADAPTIVE: EV/Sales, EV/EBITDA, or PEG)
+    # 4. VALUE (ADAPTIVE)
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
     
-    # A. Aggressive: Use EV/Sales (Price-to-Sales logic but accounting for debt)
     if mode == "Aggressive":
         val_label = "EV/Sales"
         ev_rev = safe_float(overview.get('EVToRevenue'))
         val_raw = ev_rev
-        # Scale: <3.0 is Cheap (20pts), >12.0 is Expensive (0pts)
         base_val_pts = get_points(ev_rev, 3.0, 12.0, 20, False) if ev_rev else 0
 
-    # B. Defensive: Use EV/EBITDA (The "Banker's Metric")
     elif mode == "Defensive":
         val_label = "EV/EBITDA"
         ev_ebitda = safe_float(overview.get('EVToEBITDA'))
         val_raw = ev_ebitda
-        # Scale: <8.0 is Cheap (20pts), >18.0 is Expensive (0pts)
         base_val_pts = get_points(ev_ebitda, 8.0, 18.0, 20, False) if ev_ebitda else 0
 
-    # C. Balanced/Speculative: Default to PEG
     else:
         val_label = "PEG"
         peg = safe_float(overview.get('PEGRatio'))
         val_raw = peg
-        # Scale: <1.0 is Cheap (20pts), >2.5 is Expensive (0pts)
         base_val_pts = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
 
-    raw_metrics['PEG'] = val_raw # Storing raw value in PEG column for now (or rename col in DB later)
+    raw_metrics['PEG'] = val_raw 
     log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
 
     # 5. MOMENTUM
@@ -367,7 +373,6 @@ def tf_selector(key_suffix):
     choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
     return tf_map[choice]
 
-# --- PLOT DUAL AXIS FUNCTION INSERTED HERE ---
 def plot_dual_axis(price_df, pe_df, title, days):
     cutoff = price_df.index[-1] - timedelta(days=days)
     p_sub = price_df[price_df.index >= cutoff]
@@ -382,12 +387,11 @@ def plot_dual_axis(price_df, pe_df, title, days):
     
     fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig, use_container_width=True)
-# ---------------------------------------------
 
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v18.0")
+st.title("🦅 Alpha Pro v19.0 (Smart Logging)")
 
 with st.sidebar:
     st.header("Settings")
@@ -440,12 +444,12 @@ with t1:
             hist, ov, cf, bs = get_alpha_data(tick, key)
             
         if not hist.empty and ov:
-            # Main Score Calculation
+            # Main Score
             score, log, raw_metrics, base_scores = calculate_dynamic_score(
                 ov, cf, bs, hist, active_weights, use_50ma=is_speculative, mode=mode_name
             )
             
-            # Database Scores
+            # DB Scores
             _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
             s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
             s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
@@ -482,7 +486,7 @@ with t1:
                 st.table(pd.DataFrame(list(log.items()), columns=["Metric", "Value / Weight"]))
                 
                 if st.button("⭐ Log to Cloud Watchlist"):
-                    success = add_log_to_sheet(tick, raw_metrics, scores_db)
+                    success = add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
                     if success:
                         st.success(f"Logged {tick} to Cloud!")
                         st.session_state.watchlist_df = get_watchlist_data()
@@ -493,32 +497,26 @@ with t1:
         else:
             st.error("Data Unavailable.")
 
-# --- TAB 2: WATCHLIST TRENDS (UPDATED WITH REFRESH) ---
 with t2:
-    st.header("My Watchlist Trends")
-    st.caption("Visualizing Strategy Scores over time.")
-    st.info("⚠️ API LIMIT: Updating a stock uses 4 API calls. On the Free Tier (5 calls/min), please wait ~60 seconds between updates.")
-    
+    st.header("Watchlist Trends")
+    st.info("⚠️ API LIMIT: Updates take 4 calls. Wait 60s between updates on Free Tier.")
     df_wl = st.session_state.watchlist_df
     
     if df_wl.empty or 'Ticker' not in df_wl.columns:
-        st.info("Watchlist is empty. Analyze a stock to add it.")
+        st.info("Watchlist is empty.")
     else:
         unique_list = df_wl['Ticker'].unique()
         for t in unique_list:
             history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
             latest = history.iloc[-1]
-            
             st.subheader(f"{t} Analysis")
             
-            # 1. Multi-Line Graph
             score_cols = [c for c in history.columns if 'Score (' in c]
             if score_cols and len(history) > 1:
                 fig = px.line(history, x='Date', y=score_cols, markers=True)
                 fig.update_layout(height=300, yaxis_title="Score")
                 st.plotly_chart(fig, use_container_width=True)
             
-            # 2. Latest Data Grid
             c_metrics, c_actions = st.columns([4, 1])
             with c_metrics:
                 cols = st.columns(4)
@@ -526,48 +524,34 @@ with t2:
                 if 'Score (Aggressive)' in latest: cols[1].metric("Aggressive", int(latest['Score (Aggressive)']))
                 if 'Score (Defensive)' in latest: cols[2].metric("Defensive", int(latest['Score (Defensive)']))
                 if 'Score (Speculative)' in latest: cols[3].metric("Speculative", int(latest['Score (Speculative)']))
-                st.caption(f"Last Logged: {latest['Date']}")
+                if 'Price' in latest: st.caption(f"Price: ${latest['Price']} | Logged: {latest['Date']}")
+                else: st.caption(f"Logged: {latest['Date']}")
             
             with c_actions:
-                # UPDATE BUTTON
                 if st.button(f"🔄 Update", key=f"upd_{t}"):
-                    with st.spinner(f"Fetching fresh data for {t}..."):
-                        # 1. Fetch Data
+                    with st.spinner(f"Fetching {t}..."):
                         hist, ov, cf, bs = get_alpha_data(t, key)
                         if not hist.empty and ov:
-                            # 2. Recalculate ALL Scores
-                            # We use 'Aggressive' mode for the base calculator just to get the 'raw_metrics' 
-                            # (Revenue, Margins, PEG) populated in a standard way.
                             _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
-                            
-                            # Calculate the 4 Profiles
                             s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
                             s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-                            
-                            # Defensive needs its own run for FCF check
                             s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive")
-                            
-                            # Speculative needs its own run for 50MA check
                             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-                            
                             scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
                             
-                            # 3. Save to Sheet
-                            success = add_log_to_sheet(t, raw_metrics, scores_db)
+                            curr_price = hist['close'].iloc[-1]
+                            success = add_log_to_sheet(t, curr_price, raw_metrics, scores_db)
                             if success:
                                 st.success(f"Updated {t}!")
                                 st.session_state.watchlist_df = get_watchlist_data()
-                                time.sleep(1) # Short pause before reload
+                                time.sleep(1)
                                 st.rerun()
-                        else:
-                            st.error("API Limit Reached or Data Error. Try again in 60s.")
+                        else: st.error("API Limit.")
                 
-                # DELETE BUTTON
                 if st.button("🗑️ Delete", key=f"del_{t}"):
                     remove_ticker_from_sheet(t)
                     st.session_state.watchlist_df = get_watchlist_data()
                     st.rerun()
-            
             st.divider()
 
 with t3:
