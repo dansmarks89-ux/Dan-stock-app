@@ -261,38 +261,58 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # --- 4. VALUE ---
+    # --- 4. VALUE (HYBRID MODEL) ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
 
     if mode == "Defensive":
-        val_label = "Rel P/E"
+        val_label = "Hybrid Val"
+        
+        # A. RELATIVE SCORE (50% of Value Score)
+        rel_score = 0
         current_pe = safe_float(overview.get('PERatio'))
         avg_pe = None
+        rel_str = "N/A"
         
-        # --- FIX: USE MEDIAN INSTEAD OF MEAN ---
         if historical_pe_df is not None and not historical_pe_df.empty:
-            avg_pe = historical_pe_df['pe_ratio'].median() # <--- FIXED
+            avg_pe = historical_pe_df['pe_ratio'].median() # Use Median!
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
-            # Relaxed scale: -50% premium is the floor
-            base_val_pts = get_points(pe_discount, 5.0, -50.0, 20, True)
-            val_raw = pe_discount
-            # Show details in log so you can confirm the math
-            val_str = f"Curr: {current_pe:.1f} / Med: {avg_pe:.1f}"
+            # Scale: 5% Discount (Good) to -50% Premium (Bad)
+            rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+            rel_str = f"{pe_discount:+.0f}% vs Hist"
+        
+        # B. ABSOLUTE SCORE (50% of Value Score)
+        # Uses EV/EBITDA as the "Truth" (ignores accounting noise)
+        abs_score = 0
+        ev_ebitda = safe_float(overview.get('EVToEBITDA'))
+        abs_str = "N/A"
+        
+        if ev_ebitda:
+            # Scale: <8x is Cheap (20pts), >20x is Expensive (0pts)
+            # JNJ is ~14x, so it will get ~8 points here (Safe floor)
+            abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
+            abs_str = f"{ev_ebitda:.1f}x EBITDA"
+            val_raw = ev_ebitda # Log this for the raw column
+            
+        # C. COMBINE THEM (Average)
+        if current_pe and ev_ebitda:
+            base_val_pts = (rel_score + abs_score) / 2
+            val_str = f"{rel_str} | {abs_str}"
+        elif ev_ebitda: # Fallback if no history
+            base_val_pts = abs_score
+            val_str = f"{abs_str} (Abs Only)"
         else:
-            val_label = "EV/EBITDA (Fallback)"
-            ev_ebitda = safe_float(overview.get('EVToEBITDA'))
-            val_raw = ev_ebitda
-            base_val_pts = get_points(ev_ebitda, 8.0, 18.0, 20, False) if ev_ebitda else 0
-            val_str = f"{ev_ebitda:.2f}" if ev_ebitda else None
+            base_val_pts = 0
+            val_str = "Data Missing"
             
         raw_metrics['PEG'] = val_raw
-        log["Relative Value"] = process_metric(val_label, val_str, 'value', base_val_pts)
+        log["Valuation (Hybrid)"] = process_metric(val_label, val_str, 'value', base_val_pts)
 
     else:
+        # Standard Logic for Non-Defensive modes
         if mode == "Aggressive":
             val_label = "EV/Sales"
             val_raw = safe_float(overview.get('EVToRevenue'))
