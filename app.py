@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.1", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.2", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -33,10 +33,11 @@ SECTOR_PE_BENCHMARKS = {
     "REAL ESTATE": 35.0
 }
 
-# --- STRATEGY WEIGHTS ---
+# --- STRATEGY WEIGHTS (UPDATED FOR DEFENSIVE 2.0) ---
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'profitability': 10, 'roe': 5, 'value': 5}
-WEIGHTS_DEFENSIVE = {'growth': 5, 'momentum': 35, 'profitability': 0, 'roe': 20, 'value': 40} 
+# Defensive: Value (35), ROE/Debt (30), Profit/Stability (20), Momentum (15)
+WEIGHTS_DEFENSIVE = {'value': 35, 'roe': 30, 'profitability': 20, 'momentum': 15, 'growth': 0}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
 # ==========================================
@@ -156,7 +157,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19)
+# 4. SCORING ENGINE (V19.2 - DEFENSIVE 2.0)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -169,7 +170,7 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
         if val >= worst: return 0
         return round(((worst - val)/(worst - best)) * max_pts, 1)
 
-def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weights, use_50ma=False, mode="Balanced"):
+def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weights, use_50ma=False, mode="Balanced", historical_pe_df=None):
     earned, possible = 0, 0
     log = {}
     raw_metrics = {}
@@ -190,68 +191,112 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             possible += w
             return f"N/A (0.0/{w})"
 
-    # 1. GROWTH
+    # --- 1. GROWTH ---
     rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
     raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
     base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
     log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
-    # 2. PROFITABILITY
-    margin = safe_float(overview.get('ProfitMargin'))
-    base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
-    raw_metrics['Profit Margin'] = margin * 100 if margin else None
-
-    fcf_yield = None
-    base_fcf = 0
-    try:
-        annual_reports = cash_flow.get('annualReports', [])
-        if annual_reports:
-            latest = annual_reports[0]
-            ocf = safe_float(latest.get('operatingCashflow'))
-            capex = safe_float(latest.get('capitalExpenditures'))
-            mcap = safe_float(overview.get('MarketCapitalization'))
-            if ocf and capex and mcap:
-                fcf = ocf - capex
-                fcf_yield = (fcf / mcap) * 100
-                base_fcf = get_points(fcf_yield, 5.0, 0.0, 20, True)
-    except: pass
-    raw_metrics['FCF Yield'] = fcf_yield
-
+    # --- 2. PROFITABILITY ---
     if mode == "Defensive":
-        log["Profitability"] = process_metric("FCF Yield", f"{fcf_yield:.1f}%" if fcf_yield is not None else None, 'profitability', base_fcf)
+        # Earnings Stability + FCF Yield
+        eps = safe_float(overview.get('EPS'))
+        stability_score = 20 if (eps and eps > 0) else 0
+        
+        fcf_yield = None
+        fcf_score = 0
+        try:
+            reports = cash_flow.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                ocf = safe_float(latest.get('operatingCashflow'))
+                capex = safe_float(latest.get('capitalExpenditures'))
+                mcap = safe_float(overview.get('MarketCapitalization'))
+                if ocf and capex and mcap:
+                    fcf = ocf - capex
+                    fcf_yield = (fcf / mcap) * 100
+                    fcf_score = get_points(fcf_yield, 5.0, 0.0, 20, True)
+        except: pass
+        
+        combined_prof = (stability_score + fcf_score) / 2
+        raw_metrics['FCF Yield'] = fcf_yield
+        log["Profit Stability"] = process_metric("EPS+FCF", f"EPS: {eps} / FCF: {fcf_yield:.1f}%" if fcf_yield else "N/A", 'profitability', combined_prof)
+    
     else:
+        # Standard Logic
+        margin = safe_float(overview.get('ProfitMargin'))
+        base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
+        raw_metrics['Profit Margin'] = margin * 100 if margin else None
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # 3. QUALITY
-    roe = safe_float(overview.get('ReturnOnEquityTTM'))
-    if roe and roe < 5: roe = roe * 100 
-    raw_metrics['ROE'] = roe
-    base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
-    log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
+    # --- 3. QUALITY / ROE ---
+    if mode == "Defensive":
+        # Debt/Equity Logic for Quality
+        de_ratio = None
+        base_solvency = 0
+        try:
+            reports = balance_sheet.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                liab = safe_float(latest.get('totalLiabilities'))
+                equity = safe_float(latest.get('totalShareholderEquity'))
+                if liab and equity and equity > 0:
+                    de_ratio = liab / equity
+                    base_solvency = get_points(de_ratio, 0.5, 2.0, 20, False)
+        except: pass
+        raw_metrics['ROE'] = de_ratio # Log D/E in ROE column for Defensive
+        log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
+    else:
+        # Standard ROE
+        roe = safe_float(overview.get('ReturnOnEquityTTM'))
+        if roe and roe < 5: roe = roe * 100 
+        raw_metrics['ROE'] = roe
+        base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
+        log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # 4. VALUE
+    # --- 4. VALUE ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
-    if mode == "Aggressive":
-        val_label = "EV/Sales"
-        ev_rev = safe_float(overview.get('EVToRevenue'))
-        val_raw = ev_rev
-        base_val_pts = get_points(ev_rev, 3.0, 12.0, 20, False) if ev_rev else 0
-    elif mode == "Defensive":
-        val_label = "EV/EBITDA"
-        ev_ebitda = safe_float(overview.get('EVToEBITDA'))
-        val_raw = ev_ebitda
-        base_val_pts = get_points(ev_ebitda, 8.0, 18.0, 20, False) if ev_ebitda else 0
-    else:
-        val_label = "PEG"
-        peg = safe_float(overview.get('PEGRatio'))
-        val_raw = peg
-        base_val_pts = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
-    raw_metrics['PEG'] = val_raw 
-    log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
 
-    # 5. MOMENTUM
+    if mode == "Defensive":
+        # Relative P/E Logic
+        val_label = "Rel P/E"
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            avg_pe = historical_pe_df['pe_ratio'].mean()
+            
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            base_val_pts = get_points(pe_discount, 10.0, -20.0, 20, True)
+            val_raw = pe_discount
+            val_str = f"Curr: {current_pe:.1f} / Avg: {avg_pe:.1f}"
+        else:
+            val_label = "EV/EBITDA (Fallback)"
+            ev_ebitda = safe_float(overview.get('EVToEBITDA'))
+            val_raw = ev_ebitda
+            base_val_pts = get_points(ev_ebitda, 8.0, 18.0, 20, False) if ev_ebitda else 0
+            val_str = f"{ev_ebitda:.2f}" if ev_ebitda else None
+            
+        raw_metrics['PEG'] = val_raw
+        log["Relative Value"] = process_metric(val_label, val_str, 'value', base_val_pts)
+
+    else:
+        # Standard Logic
+        if mode == "Aggressive":
+            val_label = "EV/Sales"
+            val_raw = safe_float(overview.get('EVToRevenue'))
+            base_val_pts = get_points(val_raw, 3.0, 12.0, 20, False) if val_raw else 0
+        else:
+            val_label = "PEG"
+            val_raw = safe_float(overview.get('PEGRatio'))
+            base_val_pts = get_points(val_raw, 1.0, 2.5, 20, False) if val_raw else 0
+        
+        raw_metrics['PEG'] = val_raw 
+        log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
+
+    # --- 5. MOMENTUM ---
     pct_diff, slope_pct, rvol = None, None, None
     base_pts = 0
     ma_window = 50 if use_50ma else 200
@@ -304,27 +349,16 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     ma_label = "50-Day" if use_50ma else "200-Day"
     log[f"Trend ({ma_label})"] = process_metric("Momentum", val_str, 'momentum', base_pts)
 
-    # 6. SOLVENCY PENALTY
-    de_ratio = None
-    penalty_mult = 1.0
-    try:
-        reports = balance_sheet.get('annualReports', [])
-        if reports:
-            latest = reports[0]
-            liab = safe_float(latest.get('totalLiabilities'))
-            equity = safe_float(latest.get('totalShareholderEquity'))
-            if liab and equity and equity > 0:
-                de_ratio = liab / equity
-                if mode in ["Balanced", "Defensive"]:
-                    if de_ratio > 5.0: penalty_mult = 0.70
-                    elif de_ratio > 2.0: penalty_mult = 0.85
-    except: pass
-    
-    score = int((earned/possible)*100) if possible > 0 else 0
-    if penalty_mult < 1.0:
-        score = int(score * penalty_mult)
-        log["Solvency Check"] = f"D/E {de_ratio:.2f} (Penalty: -{int((1-penalty_mult)*100)}%)"
+    # 6. DEFENSIVE PENALTY (Small Cap Gate)
+    if mode == "Defensive":
+        mcap = safe_float(overview.get('MarketCapitalization'))
+        if mcap and mcap < 2e9: # Less than $2 Billion
+            score = int((earned/possible)*100) if possible > 0 else 0
+            score = int(score * 0.50) # 50% Penalty
+            log["Stability Check"] = "Small Cap (Penalty: -50%)"
+            return score, log, raw_metrics, base_scores
 
+    score = int((earned/possible)*100) if possible > 0 else 0
     return score, log, raw_metrics, base_scores
 
 def compute_weighted_score(base_scores, weights):
@@ -361,7 +395,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v19.1 (Premium & Pro UI)")
+st.title("🦅 Alpha Pro v19.2 (Defensive 2.0 & Adaptive Value)")
 
 with st.sidebar:
     st.header("Settings")
@@ -370,11 +404,9 @@ with st.sidebar:
         key = ""
         st.warning("⚠️ AV_KEY missing")
     
-    # --- PREMIUM TOGGLE ---
     is_premium = st.checkbox("🔑 I have a Premium API Key")
-    if is_premium: st.success("Premium Mode: Rate limits removed.")
-    else: st.info("Free Mode: Safety delays active.")
-    # ----------------------
+    if is_premium: st.success("Premium Mode Active")
+    else: st.info("Free Mode: Delays Active")
     
     st.subheader("🧠 Strategy Mode")
     strategy = st.radio("Market Phase", ["Balanced", "Aggressive Growth", "Defensive / Cyclical", "Speculative / Hype"])
@@ -407,7 +439,6 @@ with st.sidebar:
 
 t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows"])
 
-# --- TAB 1: ANALYSIS (UPDATED WITH MANUAL CALCULATION FALLBACK) ---
 with t1:
     c1, c2 = st.columns([3, 1])
     tick = c1.text_input("Analyze Ticker", "AAPL").upper()
@@ -415,22 +446,26 @@ with t1:
     if tick and key:
         with st.spinner("Fetching Data..."):
             hist, ov, cf, bs = get_alpha_data(tick, key)
+            # FETCH PE HISTORY EARLY FOR DEFENSIVE LOGIC
+            pe_hist = get_historical_pe(tick, key, hist)
             
         if not hist.empty and ov:
+            # Main Score (Pass PE Hist)
             score, log, raw_metrics, base_scores = calculate_dynamic_score(
-                ov, cf, bs, hist, active_weights, use_50ma=is_speculative, mode=mode_name
+                ov, cf, bs, hist, active_weights, 
+                use_50ma=is_speculative, 
+                mode=mode_name,
+                historical_pe_df=pe_hist
             )
             
             # DB Prep
             _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
             s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
             s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive")
+            # Pass PE Hist to Defensive calc for DB too
+            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
             scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-            
-            with st.spinner("Calculating Historical P/E..."):
-                pe_hist = get_historical_pe(tick, key, hist)
             
             curr_price = hist['close'].iloc[-1]
             if len(hist) > 1: day_delta = curr_price - hist['close'].iloc[-2]
@@ -438,32 +473,22 @@ with t1:
             
             pe_now = safe_float(ov.get('PERatio', 0))
             
-            # --- ROBUST SHORT INTEREST LOGIC ---
-            # 1. Try explicit fields
+            # Smart Short Calc
             short_float = safe_float(ov.get('ShortPercentFloat'))
             short_ratio = safe_float(ov.get('ShortRatio'))
-            
-            # 2. Try Manual Calculation (Shares Short / Shares Outstanding)
             if not short_float:
                 shares_short = safe_float(ov.get('SharesShort'))
                 shares_out = safe_float(ov.get('SharesOutstanding'))
                 if shares_short and shares_out and shares_out > 0:
                     short_float = shares_short / shares_out
-            # -----------------------------------
             
             st.markdown(f"## {tick} - {ov.get('Name')}")
             k0, k1, k2, k3, k4 = st.columns(5)
             k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
-            
-            # Display Logic
-            if short_float:
-                k2.metric("Short Interest", f"{short_float*100:.2f}%", help="Shares Short / Outstanding")
-            elif short_ratio:
-                k2.metric("Short Ratio", f"{short_ratio:.2f} Days", help="Days to Cover")
-            else:
-                k2.metric("Short Info", "N/A")
-            
+            if short_float: k2.metric("Short Int", f"{short_float*100:.2f}%")
+            elif short_ratio: k2.metric("Short Ratio", f"{short_ratio:.1f} Days")
+            else: k2.metric("Short Info", "N/A")
             if pe_now: k3.metric("P/E (TTM)", f"{pe_now:.2f}")
             else: k3.metric("P/E (TTM)", "N/A")
             fcf_val = raw_metrics.get('FCF Yield')
@@ -472,14 +497,12 @@ with t1:
             col_metrics, col_chart = st.columns([1, 2])
             with col_metrics:
                 st.metric(f"Score ({mode_name})", f"{score}/100")
-                
                 df_log = pd.DataFrame(list(log.items()), columns=["Metric", "Details"])
                 st.dataframe(df_log, hide_index=True, use_container_width=True)
-                
                 if st.button("⭐ Log to Cloud Watchlist"):
                     success = add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
                     if success:
-                        st.success(f"Logged {tick} to Cloud!")
+                        st.success(f"Logged {tick}!")
                         st.session_state.watchlist_df = get_watchlist_data()
             
             with col_chart:
@@ -507,21 +530,21 @@ with t2:
             c_metrics, c_actions = st.columns([4, 1])
             with c_metrics:
                 cols = st.columns(4)
-                if 'Score (Balanced)' in latest: cols[0].metric("Balanced", int(latest['Score (Balanced)']))
-                if 'Score (Aggressive)' in latest: cols[1].metric("Aggressive", int(latest['Score (Aggressive)']))
-                if 'Score (Defensive)' in latest: cols[2].metric("Defensive", int(latest['Score (Defensive)']))
-                if 'Score (Speculative)' in latest: cols[3].metric("Speculative", int(latest['Score (Speculative)']))
-                if 'Price' in latest: st.caption(f"Price: ${latest['Price']} | Logged: {latest['Date']}")
-                else: st.caption(f"Logged: {latest['Date']}")
+                if 'Score (Balanced)' in latest: cols[0].metric("Bal", int(latest['Score (Balanced)']))
+                if 'Score (Aggressive)' in latest: cols[1].metric("Agg", int(latest['Score (Aggressive)']))
+                if 'Score (Defensive)' in latest: cols[2].metric("Def", int(latest['Score (Defensive)']))
+                if 'Score (Speculative)' in latest: cols[3].metric("Spec", int(latest['Score (Speculative)']))
+                st.caption(f"Price: ${latest.get('Price', 'N/A')} | Logged: {latest['Date']}")
             with c_actions:
                 if st.button(f"🔄 Update", key=f"upd_{t}"):
                     with st.spinner(f"Fetching {t}..."):
                         hist, ov, cf, bs = get_alpha_data(t, key)
+                        pe_hist = get_historical_pe(t, key, hist)
                         if not hist.empty and ov:
                             _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
                             s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
                             s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-                            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive")
+                            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
                             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
                             scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
                             curr_price = hist['close'].iloc[-1]
@@ -549,7 +572,6 @@ with t3:
         if not selected_sectors:
             st.error("Select sectors.")
         else:
-            # --- PREMIUM LOGIC FOR SECTORS ---
             if not is_premium:
                 st.info(f"⏳ Free Mode: Scanning {len(selected_sectors)} sectors (~{len(selected_sectors) * 12}s). Check 'Premium' in sidebar to speed up.")
             
@@ -566,7 +588,6 @@ with t3:
                 ticker = SECTOR_ETFS[sec_name]
                 status_text.text(f"Fetching {ticker}...")
                 
-                # PREMIUM CHECK HERE
                 if i > 0 and not is_premium: time.sleep(12) 
                 
                 hist, _, _, _ = get_alpha_data(ticker, key)
