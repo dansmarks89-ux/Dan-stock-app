@@ -199,7 +199,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
 
     # --- 2. PROFITABILITY ---
     if mode == "Defensive":
-        # Earnings Stability + FCF Yield
         eps = safe_float(overview.get('EPS'))
         stability_score = 20 if (eps and eps > 0) else 0
         
@@ -223,15 +222,13 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         log["Profit Stability"] = process_metric("EPS+FCF", f"EPS: {eps} / FCF: {fcf_yield:.1f}%" if fcf_yield else "N/A", 'profitability', combined_prof)
     
     else:
-        # Standard Logic
         margin = safe_float(overview.get('ProfitMargin'))
         base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
         raw_metrics['Profit Margin'] = margin * 100 if margin else None
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # --- 3. QUALITY / ROE (UPDATED FOR JNJ DEBT FIX) ---
+    # --- 3. QUALITY / ROE ---
     if mode == "Defensive":
-        # Debt/Equity Logic for Quality
         de_ratio = None
         base_solvency = 0
         try:
@@ -239,55 +236,52 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             if reports:
                 latest = reports[0]
                 equity = safe_float(latest.get('totalShareholderEquity'))
-                
-                # SMART DEBT CHECK: Try to find Financial Debt first
+                # SMART DEBT CHECK
                 short_debt = safe_float(latest.get('shortTermDebt')) or 0
                 long_debt = safe_float(latest.get('longTermDebt')) or 0
                 total_financial_debt = short_debt + long_debt
                 
-                # If we found explicit debt data, use it (This saves JNJ)
                 if total_financial_debt > 0 and equity and equity > 0:
                     de_ratio = total_financial_debt / equity
-                # Fallback to Total Liabilities if debt data is missing
                 else:
                     liab = safe_float(latest.get('totalLiabilities'))
                     if liab and equity and equity > 0:
                         de_ratio = liab / equity
                         
                 if de_ratio is not None:
-                    # Score: < 0.5 is Perfect (20 pts), > 2.0 is Bad (0 pts)
                     base_solvency = get_points(de_ratio, 0.5, 2.0, 20, False)
         except: pass
         
         raw_metrics['ROE'] = de_ratio 
         log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
     else:
-        # Standard ROE
         roe = safe_float(overview.get('ReturnOnEquityTTM'))
         if roe and roe < 5: roe = roe * 100 
         raw_metrics['ROE'] = roe
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # --- 4. VALUE (UPDATED FOR JNJ TOLERANCE FIX) ---
+    # --- 4. VALUE ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
 
     if mode == "Defensive":
-        # Relative P/E Logic
         val_label = "Rel P/E"
         current_pe = safe_float(overview.get('PERatio'))
         avg_pe = None
+        
+        # --- FIX: USE MEDIAN INSTEAD OF MEAN ---
         if historical_pe_df is not None and not historical_pe_df.empty:
-            avg_pe = historical_pe_df['pe_ratio'].mean()
+            avg_pe = historical_pe_df['pe_ratio'].median() # <--- FIXED
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
-            # RELAXED SCALE: -50% Premium (Expensive) is the new floor for 0 pts
+            # Relaxed scale: -50% premium is the floor
             base_val_pts = get_points(pe_discount, 5.0, -50.0, 20, True)
             val_raw = pe_discount
-            val_str = f"Curr: {current_pe:.1f} / Avg: {avg_pe:.1f}"
+            # Show details in log so you can confirm the math
+            val_str = f"Curr: {current_pe:.1f} / Med: {avg_pe:.1f}"
         else:
             val_label = "EV/EBITDA (Fallback)"
             ev_ebitda = safe_float(overview.get('EVToEBITDA'))
@@ -299,7 +293,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         log["Relative Value"] = process_metric(val_label, val_str, 'value', base_val_pts)
 
     else:
-        # Standard Logic
         if mode == "Aggressive":
             val_label = "EV/Sales"
             val_raw = safe_float(overview.get('EVToRevenue'))
@@ -365,12 +358,12 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     ma_label = "50-Day" if use_50ma else "200-Day"
     log[f"Trend ({ma_label})"] = process_metric("Momentum", val_str, 'momentum', base_pts)
 
-    # 6. DEFENSIVE PENALTY (Small Cap Gate)
+    # 6. DEFENSIVE PENALTY
     if mode == "Defensive":
         mcap = safe_float(overview.get('MarketCapitalization'))
-        if mcap and mcap < 2e9: # Less than $2 Billion
+        if mcap and mcap < 2e9:
             score = int((earned/possible)*100) if possible > 0 else 0
-            score = int(score * 0.50) # 50% Penalty
+            score = int(score * 0.50)
             log["Stability Check"] = "Small Cap (Penalty: -50%)"
             return score, log, raw_metrics, base_scores
 
