@@ -407,6 +407,7 @@ with st.sidebar:
 
 t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows"])
 
+# --- TAB 1: ANALYSIS (UPDATED WITH SHORT RATIO FALLBACK) ---
 with t1:
     c1, c2 = st.columns([3, 1])
     tick = c1.text_input("Analyze Ticker", "AAPL").upper()
@@ -436,13 +437,24 @@ with t1:
             else: day_delta = 0
             
             pe_now = safe_float(ov.get('PERatio', 0))
-            short_float = safe_float(ov.get('ShortPercentFloat', 0))
+            
+            # --- SMART SHORT DATA ---
+            short_float = safe_float(ov.get('ShortPercentFloat'))
+            short_ratio = safe_float(ov.get('ShortRatio'))
             
             st.markdown(f"## {tick} - {ov.get('Name')}")
             k0, k1, k2, k3, k4 = st.columns(5)
             k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
-            k2.metric("Short % Float", f"{short_float*100:.2f}%" if short_float else "N/A")
+            
+            # The Fallback Logic
+            if short_float:
+                k2.metric("Short % Float", f"{short_float*100:.2f}%", help="Percentage of shares shorted")
+            elif short_ratio:
+                k2.metric("Short Ratio", f"{short_ratio:.1f} Days", help="Days to Cover (Backup Metric)")
+            else:
+                k2.metric("Short Info", "N/A")
+            
             if pe_now: k3.metric("P/E (TTM)", f"{pe_now:.2f}")
             else: k3.metric("P/E (TTM)", "N/A")
             fcf_val = raw_metrics.get('FCF Yield')
@@ -452,11 +464,8 @@ with t1:
             with col_metrics:
                 st.metric(f"Score ({mode_name})", f"{score}/100")
                 
-                # --- FIXED UI: PROFESSIONAL TABLE ---
-                # Convert log dict to DataFrame for clean display
                 df_log = pd.DataFrame(list(log.items()), columns=["Metric", "Details"])
                 st.dataframe(df_log, hide_index=True, use_container_width=True)
-                # ------------------------------------
                 
                 if st.button("⭐ Log to Cloud Watchlist"):
                     success = add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
