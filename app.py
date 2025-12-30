@@ -227,7 +227,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             if reports:
                 latest = reports[0]
                 equity = safe_float(latest.get('totalShareholderEquity'))
-                # SMART DEBT CHECK (Financial Debt preferred)
                 short_debt = safe_float(latest.get('shortTermDebt')) or 0
                 long_debt = safe_float(latest.get('longTermDebt')) or 0
                 total_financial_debt = short_debt + long_debt
@@ -267,12 +266,15 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         rel_str = "N/A"
         
         if historical_pe_df is not None and not historical_pe_df.empty:
-            avg_pe = historical_pe_df['pe_ratio'].median() # Median robust to outliers
+            # --- FIX: USE MEAN + SANITY FLOOR ---
+            raw_mean = historical_pe_df['pe_ratio'].mean() 
+            avg_pe = max(raw_mean, 15.0) # Sanity Floor: Defensive stocks rarely trade below 15x
+            # ------------------------------------
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-            rel_str = f"Prem: {pe_discount:+.0f}% (Med: {avg_pe:.1f})"
+            rel_str = f"Prem: {pe_discount:+.0f}% (Avg: {avg_pe:.1f})"
         
         # B. ABSOLUTE SCORE (50%)
         abs_score = 0
@@ -280,7 +282,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         abs_str = "N/A"
         
         if ev_ebitda:
-            # Scale: <8x is Cheap, >20x is Expensive
             abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
             abs_str = f"{ev_ebitda:.1f}x EBITDA"
             val_raw = ev_ebitda 
