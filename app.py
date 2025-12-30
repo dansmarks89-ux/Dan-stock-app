@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.2", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.3", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -26,17 +26,10 @@ SECTOR_ETFS = {
     "S&P 500 (SPY)": "SPY"
 }
 
-SECTOR_PE_BENCHMARKS = {
-    "TECHNOLOGY": 28.5, "HEALTHCARE": 19.2, "FINANCIALS": 14.5,
-    "ENERGY": 11.8, "COMMUNICATION": 18.4, "CONSUMER DISC": 22.1,
-    "CONSUMER STAP": 20.5, "INDUSTRIALS": 21.0, "UTILITIES": 17.5,
-    "REAL ESTATE": 35.0
-}
-
-# --- STRATEGY WEIGHTS (UPDATED FOR DEFENSIVE 2.0) ---
+# --- STRATEGY WEIGHTS ---
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'profitability': 10, 'roe': 5, 'value': 5}
-# Defensive: Value (35), ROE/Debt (30), Profit/Stability (20), Momentum (15)
+# Defensive 2.0: Value (35), Quality/Debt (30), Profit/Stability (20), Momentum (15)
 WEIGHTS_DEFENSIVE = {'value': 35, 'roe': 30, 'profitability': 20, 'momentum': 15, 'growth': 0}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
@@ -56,9 +49,7 @@ def get_watchlist_data():
 def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
     try:
         existing_df = get_watchlist_data()
-        
-        # Timezone Fix (approx US Central)
-        log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+        log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d") # Timezone fix
 
         new_data = {
             "Ticker": ticker,
@@ -157,7 +148,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19.2 - DEFENSIVE 2.0)
+# 4. SCORING ENGINE (V19.3 - HYBRID VALUE)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -236,7 +227,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             if reports:
                 latest = reports[0]
                 equity = safe_float(latest.get('totalShareholderEquity'))
-                # SMART DEBT CHECK
+                # SMART DEBT CHECK (Financial Debt preferred)
                 short_debt = safe_float(latest.get('shortTermDebt')) or 0
                 long_debt = safe_float(latest.get('longTermDebt')) or 0
                 total_financial_debt = short_debt + long_debt
@@ -269,39 +260,36 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     if mode == "Defensive":
         val_label = "Hybrid Val"
         
-        # A. RELATIVE SCORE (50% of Value Score)
+        # A. RELATIVE SCORE (50%)
         rel_score = 0
         current_pe = safe_float(overview.get('PERatio'))
         avg_pe = None
         rel_str = "N/A"
         
         if historical_pe_df is not None and not historical_pe_df.empty:
-            avg_pe = historical_pe_df['pe_ratio'].median() # Use Median!
+            avg_pe = historical_pe_df['pe_ratio'].median() # Median robust to outliers
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
-            # Scale: 5% Discount (Good) to -50% Premium (Bad)
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-            rel_str = f"{pe_discount:+.0f}% vs Hist"
+            rel_str = f"Prem: {pe_discount:+.0f}% (Med: {avg_pe:.1f})"
         
-        # B. ABSOLUTE SCORE (50% of Value Score)
-        # Uses EV/EBITDA as the "Truth" (ignores accounting noise)
+        # B. ABSOLUTE SCORE (50%)
         abs_score = 0
         ev_ebitda = safe_float(overview.get('EVToEBITDA'))
         abs_str = "N/A"
         
         if ev_ebitda:
-            # Scale: <8x is Cheap (20pts), >20x is Expensive (0pts)
-            # JNJ is ~14x, so it will get ~8 points here (Safe floor)
+            # Scale: <8x is Cheap, >20x is Expensive
             abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
             abs_str = f"{ev_ebitda:.1f}x EBITDA"
-            val_raw = ev_ebitda # Log this for the raw column
+            val_raw = ev_ebitda 
             
-        # C. COMBINE THEM (Average)
+        # C. COMBINE
         if current_pe and ev_ebitda:
             base_val_pts = (rel_score + abs_score) / 2
             val_str = f"{rel_str} | {abs_str}"
-        elif ev_ebitda: # Fallback if no history
+        elif ev_ebitda:
             base_val_pts = abs_score
             val_str = f"{abs_str} (Abs Only)"
         else:
@@ -309,10 +297,10 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             val_str = "Data Missing"
             
         raw_metrics['PEG'] = val_raw
-        log["Valuation (Hybrid)"] = process_metric(val_label, val_str, 'value', base_val_pts)
+        log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
 
     else:
-        # Standard Logic for Non-Defensive modes
+        # Standard Logic
         if mode == "Aggressive":
             val_label = "EV/Sales"
             val_raw = safe_float(overview.get('EVToRevenue'))
@@ -424,7 +412,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v19.2 (Defensive 2.0 & Adaptive Value)")
+st.title("🦅 Alpha Pro v19.3 (Hybrid Valuation)")
 
 with st.sidebar:
     st.header("Settings")
@@ -475,11 +463,10 @@ with t1:
     if tick and key:
         with st.spinner("Fetching Data..."):
             hist, ov, cf, bs = get_alpha_data(tick, key)
-            # FETCH PE HISTORY EARLY FOR DEFENSIVE LOGIC
             pe_hist = get_historical_pe(tick, key, hist)
             
         if not hist.empty and ov:
-            # Main Score (Pass PE Hist)
+            # Main Score
             score, log, raw_metrics, base_scores = calculate_dynamic_score(
                 ov, cf, bs, hist, active_weights, 
                 use_50ma=is_speculative, 
@@ -491,7 +478,6 @@ with t1:
             _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
             s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
             s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-            # Pass PE Hist to Defensive calc for DB too
             s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
             scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
@@ -501,8 +487,6 @@ with t1:
             else: day_delta = 0
             
             pe_now = safe_float(ov.get('PERatio', 0))
-            
-            # Smart Short Calc
             short_float = safe_float(ov.get('ShortPercentFloat'))
             short_ratio = safe_float(ov.get('ShortRatio'))
             if not short_float:
@@ -617,55 +601,4 @@ with t3:
                 ticker = SECTOR_ETFS[sec_name]
                 status_text.text(f"Fetching {ticker}...")
                 
-                if i > 0 and not is_premium: time.sleep(12) 
-                
-                hist, _, _, _ = get_alpha_data(ticker, key)
-                if not hist.empty:
-                    sec_sub = hist[hist.index >= cutoff]['close']
-                    combined = pd.concat([sec_sub, spy_sub], axis=1).dropna()
-                    combined.columns = ['Sector', 'SPY']
-                    rel_series = (combined['Sector'] / combined['SPY'])
-                    rel_perf = (rel_series / rel_series.iloc[0] - 1) * 100
-                    df_rel[sec_name] = rel_perf
-                    
-                    ma_200 = hist['close'].rolling(200).mean().iloc[-1]
-                    curr_price = hist['close'].iloc[-1]
-                    dist_200 = ((curr_price/ma_200)-1)*100 if pd.notna(ma_200) else 0
-                    
-                    if len(rel_series) > 126:
-                        rel_6m_ago = rel_series.iloc[-126]
-                        rel_now = rel_series.iloc[-1]
-                        rel_6m_change = ((rel_now / rel_6m_ago) - 1) * 100
-                        recent_trend = rel_series.iloc[-20:]
-                        slope_proxy = (recent_trend.iloc[-1] - recent_trend.iloc[0]) / recent_trend.iloc[0] * 100
-                    else:
-                        rel_6m_change = 0
-                        slope_proxy = 0
-                    
-                    trend_score = 0
-                    if dist_200 > 0: trend_score += 40
-                    if rel_6m_change > 0: trend_score += 30
-                    if slope_proxy > 0: trend_score += 30
-                    status_icon = "🟢 Bullish" if trend_score >= 70 else "🟡 Neutral" if trend_score >= 40 else "🔴 Bearish"
-                    
-                    metrics_list.append({
-                        "Sector": sec_name,
-                        "Price": f"${curr_price:.2f}",
-                        "vs 200MA": f"{dist_200:+.1f}%",
-                        "6M Rel Perf": f"{rel_6m_change:+.1f}%",
-                        "1M Rel Slope": f"{slope_proxy:+.2f}%",
-                        "Score": f"{trend_score}/100",
-                        "Status": status_icon
-                    })
-                prog_bar.progress((i + 1) / len(selected_sectors))
-            status_text.text("Done!")
-            
-            if metrics_list:
-                df_metrics = pd.DataFrame(metrics_list).sort_values("Score", ascending=False).reset_index(drop=True)
-                st.subheader("🏆 Sector Leaderboard")
-                st.dataframe(df_metrics, use_container_width=True)
-                st.subheader("📈 Relative Strength vs SPY")
-                if not df_rel.empty:
-                    fig = px.line(df_rel, title="Sector Relative Performance")
-                    fig.add_hline(y=0, line_dash="dot", line_color="white")
-                    st.plotly_chart(fig, use_container_width=True)
+                if i >
