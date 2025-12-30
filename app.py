@@ -229,7 +229,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         raw_metrics['Profit Margin'] = margin * 100 if margin else None
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # --- 3. QUALITY / ROE ---
+    # --- 3. QUALITY / ROE (UPDATED FOR JNJ DEBT FIX) ---
     if mode == "Defensive":
         # Debt/Equity Logic for Quality
         de_ratio = None
@@ -269,7 +269,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # --- 4. VALUE ---
+    # --- 4. VALUE (UPDATED FOR JNJ TOLERANCE FIX) ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
@@ -284,7 +284,8 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
-            base_val_pts = get_points(pe_discount, 10.0, -20.0, 20, True)
+            # RELAXED SCALE: -50% Premium (Expensive) is the new floor for 0 pts
+            base_val_pts = get_points(pe_discount, 5.0, -50.0, 20, True)
             val_raw = pe_discount
             val_str = f"Curr: {current_pe:.1f} / Avg: {avg_pe:.1f}"
         else:
