@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.0")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -554,29 +554,118 @@ with t2:
                     st.rerun()
             st.divider()
 
+# --- TAB 3: SECTOR FLOWS (AUTOMATED & ENHANCED) ---
 with t3:
-    st.header("Sector Flows")
+    st.header("Sector Rotation & Money Flows")
+    st.caption("Identify which sectors are outperforming the S&P 500 (SPY).")
+    
+    # 1. Inputs
     c_sel, c_tf = st.columns([3, 1])
     with c_sel:
-        selectable = [k for k in SECTOR_ETFS.keys() if "SPY" not in k]
-        selected_sectors = st.multiselect("Select Sectors", selectable, default=["Technology (XLK)", "Energy (XLE)"])
-    with c_tf: days = tf_selector("rot")
-    if st.button("Analyze Flows", type="primary"):
-        with st.spinner("Analyzing..."):
+        # Auto-select ALL sectors by default
+        all_sectors = [k for k in SECTOR_ETFS.keys() if "SPY" not in k]
+        selected_sectors = st.multiselect("Select Sectors", all_sectors, default=all_sectors)
+    with c_tf:
+        days = tf_selector("rot")
+
+    # 2. Logic
+    if st.button("Analyze All Sectors", type="primary"):
+        if not selected_sectors:
+            st.error("Please select at least one sector.")
+        else:
+            # Warning for Free Tier users
+            st.info(f"⏳ Scanning {len(selected_sectors)} sectors. Due to API rate limits (Free Tier), this will take approx {len(selected_sectors) * 12} seconds.")
+            
             spy_hist, _, _, _ = get_alpha_data("SPY", key)
-            if spy_hist.empty: st.stop()
+            if spy_hist.empty:
+                st.error("Could not fetch SPY data. Check API Key.")
+                st.stop()
+
+            # Prepare Data Containers
             cutoff = spy_hist.index[-1] - timedelta(days=days)
             spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
             df_rel = pd.DataFrame()
+            metrics_list = []
+            
+            # Progress Bar
+            prog_bar = st.progress(0)
+            status_text = st.empty()
+            
             for i, sec_name in enumerate(selected_sectors):
                 ticker = SECTOR_ETFS[sec_name]
-                if i > 0: time.sleep(1.0) 
+                status_text.text(f"Fetching {ticker} ({i+1}/{len(selected_sectors)})... please wait.")
+                
+                # Rate Limit Sleep (Safe mode for Free Tier)
+                if i > 0: time.sleep(12) 
+                
                 hist, _, _, _ = get_alpha_data(ticker, key)
+                
                 if not hist.empty:
+                    # 1. Relative Curve Calculation
                     sec_sub = hist[hist.index >= cutoff]['close']
                     combined = pd.concat([sec_sub, spy_sub], axis=1).dropna()
                     combined.columns = ['Sector', 'SPY']
-                    rel_perf = ((combined['Sector'] / combined['SPY']) / (combined['Sector'].iloc[0] / combined['SPY'].iloc[0]) - 1) * 100
+                    
+                    # Normalize to start at 0%
+                    rel_series = (combined['Sector'] / combined['SPY'])
+                    rel_perf = (rel_series / rel_series.iloc[0] - 1) * 100
                     df_rel[sec_name] = rel_perf
-            if not df_rel.empty:
-                st.plotly_chart(px.line(df_rel, title=f"Relative vs SPY"), use_container_width=True)
+                    
+                    # 2. Advanced Metrics Calculation
+                    # A. Current vs 200MA (Trend)
+                    ma_200 = hist['close'].rolling(200).mean().iloc[-1]
+                    curr_price = hist['close'].iloc[-1]
+                    dist_200 = ((curr_price/ma_200)-1)*100 if pd.notna(ma_200) else 0
+                    
+                    # B. 6-Month Relative Performance (Alpha)
+                    # Look back ~126 trading days (6 months)
+                    if len(rel_series) > 126:
+                        rel_6m_ago = rel_series.iloc[-126]
+                        rel_now = rel_series.iloc[-1]
+                        rel_6m_change = ((rel_now / rel_6m_ago) - 1) * 100
+                        
+                        # Calculate Linear Slope of the Relative Line (The "Angle")
+                        # Simple proxy: Average weekly change of the ratio over last 4 weeks
+                        recent_trend = rel_series.iloc[-20:] # Last month
+                        slope_proxy = (recent_trend.iloc[-1] - recent_trend.iloc[0]) / recent_trend.iloc[0] * 100
+                    else:
+                        rel_6m_change = 0
+                        slope_proxy = 0
+                    
+                    # C. Interpretation
+                    trend_score = 0
+                    if dist_200 > 0: trend_score += 40 # Bullish Chart
+                    if rel_6m_change > 0: trend_score += 30 # Outperforming SPY (6M)
+                    if slope_proxy > 0: trend_score += 30 # Gaining Momentum (1M)
+                    
+                    status_icon = "🟢 Bullish" if trend_score >= 70 else "🟡 Neutral" if trend_score >= 40 else "🔴 Bearish"
+                    
+                    metrics_list.append({
+                        "Sector": sec_name,
+                        "Price": f"${curr_price:.2f}",
+                        "vs 200MA": f"{dist_200:+.1f}%",
+                        "6M Rel Perf": f"{rel_6m_change:+.1f}%",
+                        "1M Rel Slope": f"{slope_proxy:+.2f}%",
+                        "Score": f"{trend_score}/100",
+                        "Status": status_icon
+                    })
+                
+                prog_bar.progress((i + 1) / len(selected_sectors))
+            
+            status_text.text("Analysis Complete!")
+            
+            # 3. Display Results
+            if metrics_list:
+                # Convert to DF and Sort by 6M Relative Strength
+                df_metrics = pd.DataFrame(metrics_list)
+                # Sort by Score descending
+                df_metrics = df_metrics.sort_values("Score", ascending=False).reset_index(drop=True)
+                
+                st.subheader("🏆 Sector Leaderboard")
+                st.dataframe(df_metrics, use_container_width=True)
+                
+                st.subheader("📈 Relative Strength vs SPY")
+                if not df_rel.empty:
+                    fig = px.line(df_rel, title="Sector Relative Performance (Baseline = SPY)")
+                    fig.add_hline(y=0, line_dash="dot", line_color="white", annotation_text="SPY Baseline")
+                    st.plotly_chart(fig, use_container_width=True)
