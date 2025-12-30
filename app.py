@@ -407,7 +407,7 @@ with st.sidebar:
 
 t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows"])
 
-# --- TAB 1: ANALYSIS (UPDATED WITH SHORT RATIO FALLBACK) ---
+# --- TAB 1: ANALYSIS (UPDATED WITH MANUAL CALCULATION FALLBACK) ---
 with t1:
     c1, c2 = st.columns([3, 1])
     tick = c1.text_input("Analyze Ticker", "AAPL").upper()
@@ -438,20 +438,29 @@ with t1:
             
             pe_now = safe_float(ov.get('PERatio', 0))
             
-            # --- SMART SHORT DATA ---
+            # --- ROBUST SHORT INTEREST LOGIC ---
+            # 1. Try explicit fields
             short_float = safe_float(ov.get('ShortPercentFloat'))
             short_ratio = safe_float(ov.get('ShortRatio'))
+            
+            # 2. Try Manual Calculation (Shares Short / Shares Outstanding)
+            if not short_float:
+                shares_short = safe_float(ov.get('SharesShort'))
+                shares_out = safe_float(ov.get('SharesOutstanding'))
+                if shares_short and shares_out and shares_out > 0:
+                    short_float = shares_short / shares_out
+            # -----------------------------------
             
             st.markdown(f"## {tick} - {ov.get('Name')}")
             k0, k1, k2, k3, k4 = st.columns(5)
             k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
             
-            # The Fallback Logic
+            # Display Logic
             if short_float:
-                k2.metric("Short % Float", f"{short_float*100:.2f}%", help="Percentage of shares shorted")
+                k2.metric("Short Interest", f"{short_float*100:.2f}%", help="Shares Short / Outstanding")
             elif short_ratio:
-                k2.metric("Short Ratio", f"{short_ratio:.1f} Days", help="Days to Cover (Backup Metric)")
+                k2.metric("Short Ratio", f"{short_ratio:.2f} Days", help="Days to Cover")
             else:
                 k2.metric("Short Info", "N/A")
             
