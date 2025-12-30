@@ -238,13 +238,28 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             reports = balance_sheet.get('annualReports', [])
             if reports:
                 latest = reports[0]
-                liab = safe_float(latest.get('totalLiabilities'))
                 equity = safe_float(latest.get('totalShareholderEquity'))
-                if liab and equity and equity > 0:
-                    de_ratio = liab / equity
+                
+                # SMART DEBT CHECK: Try to find Financial Debt first
+                short_debt = safe_float(latest.get('shortTermDebt')) or 0
+                long_debt = safe_float(latest.get('longTermDebt')) or 0
+                total_financial_debt = short_debt + long_debt
+                
+                # If we found explicit debt data, use it (This saves JNJ)
+                if total_financial_debt > 0 and equity and equity > 0:
+                    de_ratio = total_financial_debt / equity
+                # Fallback to Total Liabilities if debt data is missing
+                else:
+                    liab = safe_float(latest.get('totalLiabilities'))
+                    if liab and equity and equity > 0:
+                        de_ratio = liab / equity
+                        
+                if de_ratio is not None:
+                    # Score: < 0.5 is Perfect (20 pts), > 2.0 is Bad (0 pts)
                     base_solvency = get_points(de_ratio, 0.5, 2.0, 20, False)
         except: pass
-        raw_metrics['ROE'] = de_ratio # Log D/E in ROE column for Defensive
+        
+        raw_metrics['ROE'] = de_ratio 
         log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
     else:
         # Standard ROE
