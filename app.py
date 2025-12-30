@@ -251,7 +251,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # --- 4. VALUE (HYBRID MODEL) ---
+    # --- 4. VALUE (GRAPH-MATCHING LOGIC) ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
@@ -265,16 +265,30 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         avg_pe = None
         rel_str = "N/A"
         
+        # --- FIX: USE LAST 5 YEARS (MATCHING THE GRAPH) ---
         if historical_pe_df is not None and not historical_pe_df.empty:
-            # --- FIX: USE MEAN + SANITY FLOOR ---
-            raw_mean = historical_pe_df['pe_ratio'].mean() 
-            avg_pe = max(raw_mean, 15.0) # Sanity Floor: Defensive stocks rarely trade below 15x
-            # ------------------------------------
+            # 1. Slice to last 5 years (approx 1260 trading days)
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            
+            if not recent_pe.empty:
+                # 2. Trim Outliers (Remove top/bottom 10% to fix glitches)
+                # This ensures the "Average" matches the visual line, ignoring spikes
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                
+                # 3. Calculate Mean of this clean, recent data
+                if not trimmed_pe.empty:
+                    avg_pe = trimmed_pe.mean()
+                else:
+                    avg_pe = recent_pe.mean() # Fallback if trim is too aggressive
+        # ----------------------------------------------------
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-            rel_str = f"Prem: {pe_discount:+.0f}% (Avg: {avg_pe:.1f})"
+            rel_str = f"Prem: {pe_discount:+.0f}% (5Y Avg: {avg_pe:.1f})"
         
         # B. ABSOLUTE SCORE (50%)
         abs_score = 0
@@ -301,7 +315,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
 
     else:
-        # Standard Logic
         if mode == "Aggressive":
             val_label = "EV/Sales"
             val_raw = safe_float(overview.get('EVToRevenue'))
