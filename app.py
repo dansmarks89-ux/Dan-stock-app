@@ -196,17 +196,51 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             log["Volatility (Beta)"] = process_metric("Beta", "N/A", 'growth', 0)
             
     elif mode == "Balanced":
-        # BALANCED 2.0: Rev Growth (50%) + EPS Growth (50%)
-        # EPS Growth provides a check on whether revenue is profitable
-        eps_growth = safe_float(overview.get('QuarterlyEarningsGrowthYOY'))
+        # BALANCED 2.0: PEG Ratio + Relative P/E
+        val_label = "Hybrid PEG"
         
-        rev_score = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
-        eps_score = get_points(eps_growth * 100, 20, 0, 20, True) if eps_growth else 0
+        # 1. PEG Ratio (50%)
+        peg = safe_float(overview.get('PEGRatio'))
+        peg_score = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
         
-        avg_score = (rev_score + eps_score) / 2
-        val_str = f"Rev: {rev_growth*100:.1f}% / EPS: {eps_growth*100:.1f}%" if eps_growth else f"Rev: {rev_growth*100:.1f}%"
+        # 2. Relative P/E (50%)
+        rel_score = 0
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        pe_discount = None # Initialize to avoid errors
         
-        log["Growth (Top+Bottom)"] = process_metric("Growth Blend", val_str, 'growth', avg_score)
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            if not recent_pe.empty:
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+        
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+        
+        avg_val_pts = (peg_score + rel_score) / 2
+        
+        # --- FIX STARTS HERE ---
+        # Safely format PEG string first
+        if peg is not None:
+            peg_str = f"{peg:.2f}"
+        else:
+            peg_str = "N/A"
+            
+        # Safely build the final string
+        if peg and current_pe and avg_pe and pe_discount is not None:
+            val_str = f"PEG: {peg_str} | Prem: {pe_discount:+.0f}%"
+        else:
+            val_str = f"PEG: {peg_str}"
+        # --- FIX ENDS HERE ---
+        
+        raw_metrics['PEG'] = peg
+        log["Valuation (PEG+Rel)"] = process_metric(val_label, val_str, 'value', avg_val_pts)
         
     else:
         # Standard Revenue Growth (Aggressive)
