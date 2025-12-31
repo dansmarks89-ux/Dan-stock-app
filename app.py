@@ -221,6 +221,33 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             earned += 0
             possible += w
             return f"N/A (0.0/{w})"
+            
+    # --- HELPER: GET FCF (Annual with Quarterly Fallback) ---
+    def get_fcf_ttm(cash_flow_data):
+        # 1. Try Annual First
+        try:
+            reports = cash_flow_data.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                ocf = safe_float(latest.get('operatingCashflow'))
+                capex = safe_float(latest.get('capitalExpenditures'))
+                if ocf is not None and capex is not None:
+                    return ocf - capex
+        except: pass
+        
+        # 2. Fallback: Sum last 4 Quarters
+        try:
+            q_reports = cash_flow_data.get('quarterlyReports', [])
+            if len(q_reports) >= 4:
+                ttm_ocf = 0
+                ttm_capex = 0
+                for i in range(4):
+                    ttm_ocf += safe_float(q_reports[i].get('operatingCashflow')) or 0
+                    ttm_capex += safe_float(q_reports[i].get('capitalExpenditures')) or 0
+                return ttm_ocf - ttm_capex
+        except: pass
+        
+        return None
 
     # --- 1. GROWTH ---
     rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
@@ -229,14 +256,12 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     if mode == "Defensive":
         beta = safe_float(overview.get('Beta'))
         if beta:
-            # Low Volatility is the "Growth" of Defense
             base_pts = get_points(beta, 0.8, 1.3, 20, False)
             log["Volatility (Beta)"] = process_metric("Beta", f"{beta:.2f}", 'growth', base_pts)
         else:
             log["Volatility (Beta)"] = process_metric("Beta", "N/A", 'growth', 0)
             
     elif mode == "Balanced":
-        # Average Revenue Growth + EPS Growth
         eps_growth = safe_float(overview.get('QuarterlyEarningsGrowthYOY'))
         rev_score = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
         eps_score = get_points(eps_growth * 100, 20, 0, 20, True) if eps_growth else 0
@@ -253,98 +278,69 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     margin = safe_float(overview.get('ProfitMargin'))
     raw_metrics['Profit Margin'] = margin * 100 if margin else None
 
+    # Calculate FCF Yield once here to use in all modes
+    fcf_val = get_fcf_ttm(cash_flow)
+    mcap = safe_float(overview.get('MarketCapitalization'))
+    fcf_yield = None
+    if fcf_val is not None and mcap and mcap > 0:
+        fcf_yield = (fcf_val / mcap) * 100
+    
+    raw_metrics['FCF Yield'] = fcf_yield # Store for DB
+
     if mode == "Defensive":
-        # --- SMART INCOME LOGIC ---
-        # 1. Calculate Dividend Score
         div_yield = safe_float(overview.get('DividendYield'))
         div_yield = div_yield * 100 if div_yield else 0
         div_score = get_points(div_yield, 3.5, 0.5, 20, True)
         
-        # 2. Calculate FCF Score (Target > 6%)
-        fcf_yield = None
-        fcf_score = 0
-        try:
-            reports = cash_flow.get('annualReports', [])
-            if reports:
-                latest = reports[0]
-                ocf = safe_float(latest.get('operatingCashflow'))
-                capex = safe_float(latest.get('capitalExpenditures'))
-                mcap = safe_float(overview.get('MarketCapitalization'))
-                if ocf and capex and mcap:
-                    fcf = ocf - capex
-                    fcf_yield = (fcf / mcap) * 100
-                    fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True)
-        except: pass
+        fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True) if fcf_yield is not None else 0
         
-        # 3. The "Max" Logic
-        # If FCF is massive (PYPL), use that score entirely. 
-        # If Dividend helps (LMT), use the blend.
+        # Max Logic
         blend_score = (div_score + fcf_score) / 2
         final_prof_score = max(fcf_score, blend_score)
         
-        raw_metrics['FCF Yield'] = fcf_yield
+        # Safe String Formatting
+        fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
         
-        # Creating a helpful log message
         if fcf_score > blend_score:
-             msg = f"FCF: {fcf_yield:.1f}% (Div Ignored)"
+             msg = f"FCF: {fcf_str} (Div Ignored)"
         else:
-             msg = f"Div: {div_yield:.1f}% / FCF: {fcf_yield:.1f}%"
+             msg = f"Div: {div_yield:.1f}% / FCF: {fcf_str}"
              
-        log["Income (Smart Yield)"] = process_metric("Income", msg if fcf_yield else "N/A", 'profitability', final_prof_score)
+        log["Income (Smart Yield)"] = process_metric("Income", msg, 'profitability', final_prof_score)
     
     elif mode == "Balanced":
-        # Balanced 2.1: Weight FCF higher (70%) to avoid accounting noise
-        fcf_yield = None
-        fcf_score = 0
-        try:
-            reports = cash_flow.get('annualReports', [])
-            if reports:
-                latest = reports[0]
-                ocf = safe_float(latest.get('operatingCashflow'))
-                capex = safe_float(latest.get('capitalExpenditures'))
-                mcap = safe_float(overview.get('MarketCapitalization'))
-                if ocf and capex and mcap:
-                    fcf = ocf - capex
-                    fcf_yield = (fcf / mcap) * 100
-                    fcf_score = get_points(fcf_yield, 5.0, 1.0, 20, True)
-        except: pass
-        
+        fcf_score = get_points(fcf_yield, 5.0, 1.0, 20, True) if fcf_yield is not None else 0
         margin_score = get_points(margin * 100, 25, 5, 20, True) if margin else 0
         
-        # 70% FCF / 30% Net Margin
         avg_prof = (margin_score * 0.3) + (fcf_score * 0.7)
-        val_str = f"N.Marg: {margin*100:.1f}% / FCF: {fcf_yield:.1f}%" if fcf_yield else f"N.Marg: {margin*100:.1f}%"
         
-        raw_metrics['FCF Yield'] = fcf_yield
+        fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
+        val_str = f"N.Marg: {margin*100:.1f}% / FCF: {fcf_str}"
+        
         log["Profit (Cash Heavy)"] = process_metric("Profit Blend", val_str, 'profitability', avg_prof)
         
     elif mode == "Aggressive":
-        # Rule of 40 (Unchanged)
         r_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
         r_growth = r_growth * 100 if r_growth else 0
-        fcf_margin = 0
-        try:
-            reports = cash_flow.get('annualReports', [])
-            if reports:
-                latest = reports[0]
-                rev_annual = safe_float(overview.get('RevenueTTM')) 
-                ocf = safe_float(latest.get('operatingCashflow'))
-                capex = safe_float(latest.get('capitalExpenditures'))
-                if ocf and capex and rev_annual and rev_annual > 0:
-                    fcf = ocf - capex
-                    fcf_margin = (fcf / rev_annual) * 100
-                elif rev_annual and rev_annual > 0:
-                    net_income = safe_float(latest.get('netIncome'))
-                    if net_income: fcf_margin = (net_income / rev_annual) * 100
-        except: pass
         
+        fcf_margin = 0
+        rev_annual = safe_float(overview.get('RevenueTTM')) 
+        
+        if fcf_val is not None and rev_annual and rev_annual > 0:
+            fcf_margin = (fcf_val / rev_annual) * 100
+        else:
+            # Last ditch fallback to Net Income if FCF fails completely
+            try:
+                net_income = safe_float(cash_flow.get('annualReports', [])[0].get('netIncome'))
+                if net_income and rev_annual: fcf_margin = (net_income / rev_annual) * 100
+            except: pass
+
         rule_40 = r_growth + fcf_margin
         base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
         raw_metrics['Profit Margin'] = fcf_margin 
         log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f} (Gr:{r_growth:.1f}+M:{fcf_margin:.1f})", 'profitability', base_rule_pts)
 
     else:
-        # Speculative
         base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
