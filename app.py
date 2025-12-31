@@ -31,6 +31,7 @@ WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
 # DEFENSIVE 2.1 (Recession Ready)
+# Value (25), Income/Prof (25), Beta/Growth (25), Solvency/ROE (15), Momentum (10)
 WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
 
 # AGGRESSIVE 2.0 (GARP Mode)
@@ -285,8 +286,10 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                         de_ratio = liab / equity
                         
                 if de_ratio is not None:
+                    # Relaxed Scale (0.5 to 3.0) for Defensive
                     base_solvency = get_points(de_ratio, 0.5, 3.0, 20, False)
         except: pass
+        
         raw_metrics['ROE'] = de_ratio 
         log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
         
@@ -477,3 +480,285 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
 
     score = int((earned/possible)*100) if possible > 0 else 0
     return score, log, raw_metrics, base_scores
+
+def compute_weighted_score(base_scores, weights):
+    earned = 0
+    possible = 0
+    for key, weight in weights.items():
+        if key in base_scores:
+            pts = (base_scores[key] / 20) * weight
+            earned += pts
+            possible += weight
+    return int((earned/possible)*100) if possible > 0 else 0
+
+# ==========================================
+# 5. UI HELPERS & PLOTTING
+# ==========================================
+def tf_selector(key_suffix):
+    c_tf = st.columns(4)
+    tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
+    choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
+    return tf_map[choice]
+
+def plot_dual_axis(price_df, pe_df, title, days):
+    cutoff = price_df.index[-1] - timedelta(days=days)
+    p_sub = price_df[price_df.index >= cutoff]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=p_sub.index, y=p_sub['close'], name="Price ($)", line=dict(color='#00CC96', width=2)))
+    if not pe_df.empty:
+        pe_sub = pe_df[pe_df.index >= cutoff]
+        if not pe_sub.empty:
+            fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
+    fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig, use_container_width=True)
+
+# ==========================================
+# 6. MAIN APP
+# ==========================================
+st.title("🦅 Alpha Pro v19.5 (GARP + Defensive)")
+
+with st.sidebar:
+    st.header("Settings")
+    if "AV_KEY" in st.secrets: key = st.secrets["AV_KEY"]
+    else: 
+        key = ""
+        st.warning("⚠️ AV_KEY missing")
+    
+    is_premium = st.checkbox("🔑 I have a Premium API Key")
+    if is_premium: st.success("Premium Mode Active")
+    else: st.info("Free Mode: Delays Active")
+    
+    st.subheader("🧠 Strategy Mode")
+    strategy = st.radio("Market Phase", ["Balanced", "Aggressive Growth", "Defensive / Cyclical", "Speculative / Hype"])
+    
+    is_speculative = False
+    mode_name = "Balanced"
+    
+    if "Aggressive" in strategy:
+        active_weights = WEIGHTS_AGGRESSIVE
+        mode_name = "Aggressive"
+    elif "Defensive" in strategy:
+        active_weights = WEIGHTS_DEFENSIVE
+        mode_name = "Defensive"
+    elif "Speculative" in strategy:
+        active_weights = WEIGHTS_SPECULATIVE
+        mode_name = "Speculative"
+        is_speculative = True
+    else:
+        active_weights = WEIGHTS_BALANCED
+        mode_name = "Balanced"
+
+    if 'watchlist_df' not in st.session_state:
+        st.session_state.watchlist_df = get_watchlist_data()
+    
+    st.markdown("---")
+    if not st.session_state.watchlist_df.empty and 'Ticker' in st.session_state.watchlist_df.columns:
+        unique_tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
+    else: unique_tickers = []
+    st.info(f"Tracking {len(unique_tickers)} Stocks")
+
+t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows"])
+
+with t1:
+    c1, c2 = st.columns([3, 1])
+    tick = c1.text_input("Analyze Ticker", "AAPL").upper()
+    
+    if tick and key:
+        with st.spinner("Fetching Data..."):
+            hist, ov, cf, bs = get_alpha_data(tick, key)
+            pe_hist = get_historical_pe(tick, key, hist)
+            
+        if not hist.empty and ov:
+            # Main Score
+            score, log, raw_metrics, base_scores = calculate_dynamic_score(
+                ov, cf, bs, hist, active_weights, 
+                use_50ma=is_speculative, 
+                mode=mode_name,
+                historical_pe_df=pe_hist
+            )
+            
+            # DB Prep (Runs all 4 modes for the log)
+            _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
+            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
+            
+            # For Aggressive DB log, we need to run it properly to get Rule of 40 score
+            s_agg, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+            
+            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+            s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+            
+            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
+            
+            curr_price = hist['close'].iloc[-1]
+            if len(hist) > 1: day_delta = curr_price - hist['close'].iloc[-2]
+            else: day_delta = 0
+            
+            pe_now = safe_float(ov.get('PERatio', 0))
+            short_float = safe_float(ov.get('ShortPercentFloat'))
+            short_ratio = safe_float(ov.get('ShortRatio'))
+            if not short_float:
+                shares_short = safe_float(ov.get('SharesShort'))
+                shares_out = safe_float(ov.get('SharesOutstanding'))
+                if shares_short and shares_out and shares_out > 0:
+                    short_float = shares_short / shares_out
+            
+            st.markdown(f"## {tick} - {ov.get('Name')}")
+            k0, k1, k2, k3, k4 = st.columns(5)
+            k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
+            k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
+            if short_float: k2.metric("Short Int", f"{short_float*100:.2f}%")
+            elif short_ratio: k2.metric("Short Ratio", f"{short_ratio:.1f} Days")
+            else: k2.metric("Short Info", "N/A")
+            if pe_now: k3.metric("P/E (TTM)", f"{pe_now:.2f}")
+            else: k3.metric("P/E (TTM)", "N/A")
+            fcf_val = raw_metrics.get('FCF Yield')
+            k4.metric("FCF Yield", f"{fcf_val:.2f}%" if fcf_val else "N/A")
+            
+            col_metrics, col_chart = st.columns([1, 2])
+            with col_metrics:
+                st.metric(f"Score ({mode_name})", f"{score}/100")
+                df_log = pd.DataFrame(list(log.items()), columns=["Metric", "Details"])
+                st.dataframe(df_log, hide_index=True, use_container_width=True)
+                if st.button("⭐ Log to Cloud Watchlist"):
+                    success = add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
+                    if success:
+                        st.success(f"Logged {tick}!")
+                        st.session_state.watchlist_df = get_watchlist_data()
+            
+            with col_chart:
+                days = tf_selector("ind")
+                plot_dual_axis(hist, pe_hist, f"{tick}: Price vs Valuation (P/E)", days)
+        else:
+            st.error("Data Unavailable.")
+
+with t2:
+    st.header("Watchlist Trends")
+    df_wl = st.session_state.watchlist_df
+    if df_wl.empty or 'Ticker' not in df_wl.columns:
+        st.info("Watchlist is empty.")
+    else:
+        unique_list = df_wl['Ticker'].unique()
+        for t in unique_list:
+            history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
+            latest = history.iloc[-1]
+            st.subheader(f"{t} Analysis")
+            score_cols = [c for c in history.columns if 'Score (' in c]
+            if score_cols and len(history) > 1:
+                fig = px.line(history, x='Date', y=score_cols, markers=True)
+                fig.update_layout(height=300, yaxis_title="Score")
+                st.plotly_chart(fig, use_container_width=True)
+            c_metrics, c_actions = st.columns([4, 1])
+            with c_metrics:
+                cols = st.columns(4)
+                if 'Score (Balanced)' in latest: cols[0].metric("Bal", int(latest['Score (Balanced)']))
+                if 'Score (Aggressive)' in latest: cols[1].metric("Agg", int(latest['Score (Aggressive)']))
+                if 'Score (Defensive)' in latest: cols[2].metric("Def", int(latest['Score (Defensive)']))
+                if 'Score (Speculative)' in latest: cols[3].metric("Spec", int(latest['Score (Speculative)']))
+                st.caption(f"Price: ${latest.get('Price', 'N/A')} | Logged: {latest['Date']}")
+            with c_actions:
+                if st.button(f"🔄 Update", key=f"upd_{t}"):
+                    with st.spinner(f"Fetching {t}..."):
+                        hist, ov, cf, bs = get_alpha_data(t, key)
+                        pe_hist = get_historical_pe(t, key, hist)
+                        if not hist.empty and ov:
+                            _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
+                            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
+                            
+                            s_agg, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+                            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+                            s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+                            
+                            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
+                            curr_price = hist['close'].iloc[-1]
+                            success = add_log_to_sheet(t, curr_price, raw_metrics, scores_db)
+                            if success:
+                                st.success(f"Updated {t}!")
+                                st.session_state.watchlist_df = get_watchlist_data()
+                                time.sleep(1)
+                                st.rerun()
+                        else: st.error("API Error.")
+                if st.button("🗑️ Delete", key=f"del_{t}"):
+                    remove_ticker_from_sheet(t)
+                    st.session_state.watchlist_df = get_watchlist_data()
+                    st.rerun()
+            st.divider()
+
+with t3:
+    st.header("Sector Flows")
+    c_sel, c_tf = st.columns([3, 1])
+    with c_sel:
+        all_sectors = [k for k in SECTOR_ETFS.keys() if "SPY" not in k]
+        selected_sectors = st.multiselect("Select Sectors", all_sectors, default=all_sectors)
+    with c_tf: days = tf_selector("rot")
+    if st.button("Analyze All Sectors", type="primary"):
+        if not selected_sectors:
+            st.error("Select sectors.")
+        else:
+            if not is_premium:
+                st.info(f"⏳ Free Mode: Scanning {len(selected_sectors)} sectors (~{len(selected_sectors) * 12}s). Check 'Premium' in sidebar to speed up.")
+            
+            spy_hist, _, _, _ = get_alpha_data("SPY", key)
+            if spy_hist.empty: st.stop()
+            cutoff = spy_hist.index[-1] - timedelta(days=days)
+            spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
+            df_rel = pd.DataFrame()
+            metrics_list = []
+            prog_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, sec_name in enumerate(selected_sectors):
+                ticker = SECTOR_ETFS[sec_name]
+                status_text.text(f"Fetching {ticker}...")
+                
+                if i > 0 and not is_premium: time.sleep(12) 
+                
+                hist, _, _, _ = get_alpha_data(ticker, key)
+                if not hist.empty:
+                    sec_sub = hist[hist.index >= cutoff]['close']
+                    combined = pd.concat([sec_sub, spy_sub], axis=1).dropna()
+                    combined.columns = ['Sector', 'SPY']
+                    rel_series = (combined['Sector'] / combined['SPY'])
+                    rel_perf = (rel_series / rel_series.iloc[0] - 1) * 100
+                    df_rel[sec_name] = rel_perf
+                    
+                    ma_200 = hist['close'].rolling(200).mean().iloc[-1]
+                    curr_price = hist['close'].iloc[-1]
+                    dist_200 = ((curr_price/ma_200)-1)*100 if pd.notna(ma_200) else 0
+                    
+                    if len(rel_series) > 126:
+                        rel_6m_ago = rel_series.iloc[-126]
+                        rel_now = rel_series.iloc[-1]
+                        rel_6m_change = ((rel_now / rel_6m_ago) - 1) * 100
+                        recent_trend = rel_series.iloc[-20:]
+                        slope_proxy = (recent_trend.iloc[-1] - recent_trend.iloc[0]) / recent_trend.iloc[0] * 100
+                    else:
+                        rel_6m_change = 0
+                        slope_proxy = 0
+                    
+                    trend_score = 0
+                    if dist_200 > 0: trend_score += 40
+                    if rel_6m_change > 0: trend_score += 30
+                    if slope_proxy > 0: trend_score += 30
+                    status_icon = "🟢 Bullish" if trend_score >= 70 else "🟡 Neutral" if trend_score >= 40 else "🔴 Bearish"
+                    
+                    metrics_list.append({
+                        "Sector": sec_name,
+                        "Price": f"${curr_price:.2f}",
+                        "vs 200MA": f"{dist_200:+.1f}%",
+                        "6M Rel Perf": f"{rel_6m_change:+.1f}%",
+                        "1M Rel Slope": f"{slope_proxy:+.2f}%",
+                        "Score": f"{trend_score}/100",
+                        "Status": status_icon
+                    })
+                prog_bar.progress((i + 1) / len(selected_sectors))
+            status_text.text("Done!")
+            
+            if metrics_list:
+                df_metrics = pd.DataFrame(metrics_list).sort_values("Score", ascending=False).reset_index(drop=True)
+                st.subheader("🏆 Sector Leaderboard")
+                st.dataframe(df_metrics, use_container_width=True)
+                st.subheader("📈 Relative Strength vs SPY")
+                if not df_rel.empty:
+                    fig = px.line(df_rel, title="Sector Relative Performance")
+                    fig.add_hline(y=0, line_dash="dot", line_color="white")
+                    st.plotly_chart(fig, use_container_width=True)
