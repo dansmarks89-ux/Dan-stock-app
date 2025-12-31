@@ -747,16 +747,23 @@ with t2:
                     with st.spinner(f"Fetching {t}..."):
                         hist, ov, cf, bs = get_alpha_data(t, key)
                         pe_hist = get_historical_pe(t, key, hist)
+                        
                         if not hist.empty and ov:
-                            _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
-                            s_bal, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+                            # --- FIX: ALWAYS USE BALANCED FOR RAW METRICS ---
+                            # We run Balanced first to ensure 'raw_metrics' contains standard 
+                            # Net Margin and FCF Yield, not strategy-specific variations.
+                            s_bal, _, raw_metrics, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+                            
+                            # Now calculate the other scores solely for the number (ignoring their raw_metrics)
                             s_agg, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
                             s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
                             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
                             
                             scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
                             curr_price = hist['close'].iloc[-1]
+                            
                             success = add_log_to_sheet(t, curr_price, raw_metrics, scores_db)
+                            
                             if success:
                                 st.success(f"Updated {t}!")
                                 st.session_state.watchlist_df = get_watchlist_data()
