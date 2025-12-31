@@ -270,23 +270,38 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         log["Profit (Acc+Cash)"] = process_metric("Profit Blend", val_str, 'profitability', avg_prof)
         
     elif mode == "Aggressive":
-        # RULE OF 40 Logic (As before)
-        r_growth = rev_growth * 100 if rev_growth else 0
+        # RULE OF 40 (Growth + FCF Margin)
+        r_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+        r_growth = r_growth * 100 if r_growth else 0
+        
         fcf_margin = 0
         try:
             reports = cash_flow.get('annualReports', [])
             if reports:
                 latest = reports[0]
+                rev_annual = safe_float(overview.get('RevenueTTM')) 
+                
+                # Try FCF first (Best)
                 ocf = safe_float(latest.get('operatingCashflow'))
                 capex = safe_float(latest.get('capitalExpenditures'))
-                rev_annual = safe_float(overview.get('RevenueTTM')) 
+                
                 if ocf and capex and rev_annual and rev_annual > 0:
                     fcf = ocf - capex
                     fcf_margin = (fcf / rev_annual) * 100
+                # FALLBACK: If CapEx is missing, use Net Income Margin (Good enough proxy)
+                elif rev_annual and rev_annual > 0:
+                    net_income = safe_float(latest.get('netIncome'))
+                    if net_income:
+                        fcf_margin = (net_income / rev_annual) * 100
+                        
         except: pass
+        
         rule_40 = r_growth + fcf_margin
         base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
-        log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f}", 'profitability', base_rule_pts)
+        
+        raw_metrics['Profit Margin'] = fcf_margin 
+        # Added details to log so you can see WHICH margin it used
+        log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f} (Gr:{r_growth:.1f}+M:{fcf_margin:.1f})", 'profitability', base_rule_pts)
 
     else:
         # Speculative (Net Margin)
