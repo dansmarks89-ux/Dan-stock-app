@@ -783,45 +783,79 @@ with t1:
 
 with t2:
     st.header("Watchlist Trends")
-    
-    # --- UPDATE ALL BUTTON ---
-    if not st.session_state.watchlist_df.empty:
-        c_btn, c_info = st.columns([1, 3])
-        with c_btn:
-            if st.button("🔄 Update ALL Stocks"):
-                if not key:
-                    st.error("No API Key")
-                else:
-                    unique_list = st.session_state.watchlist_df['Ticker'].unique()
-                    prog_bar = st.progress(0)
-                    status = st.empty()
-                    
-                    for i, t in enumerate(unique_list):
-                        status.text(f"Updating {t} ({i+1}/{len(unique_list)})...")
-                        hist, ov, cf, bs = get_alpha_data(t, key)
-                        pe_hist = get_historical_pe(t, key, hist)
-                        
-                        if not hist.empty and ov:
-                            # CRITICAL FIX: Run Balanced first to get standard raw_metrics (Net Margin/FCF Yield)
-                            s_bal, _, raw_metrics, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
-                            s_agg, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-                            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-                            s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-                            
-                            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-                            curr_price = hist['close'].iloc[-1]
-                            add_log_to_sheet(t, curr_price, raw_metrics, scores_db)
-                        
-                        # Delay for 75 calls/min limit
-                        time.sleep(4.5)
-                        prog_bar.progress((i + 1) / len(unique_list))
-                    
-                    status.text("All Updated!")
-                    st.session_state.watchlist_df = get_watchlist_data()
-                    st.rerun()
-
     df_wl = st.session_state.watchlist_df
     
+    #  <--- PASTE THE NEW "TOP PICKS" CODE RIGHT HERE (Lines 1-49 below) --->
+    
+    # --- TOP PICKS DASHBOARD (ELITE MOMENTUM) ---
+    if not df_wl.empty and 'Ticker' in df_wl.columns:
+        st.markdown("### 🏆 Daily Top Picks (Elite > 75)")
+        
+        # 1. Prepare Data
+        latest_entries = []
+        for t in df_wl['Ticker'].unique():
+            row = df_wl[df_wl['Ticker'] == t].sort_values("Date").iloc[-1]
+            latest_entries.append(row)
+        df_latest = pd.DataFrame(latest_entries)
+        
+        # 2. Helper to filter & sort
+        def get_top_picks(df, score_col, min_score=75):
+            # Filter for elite scores first
+            elite = df[df[score_col] >= min_score]
+            # If no elite stocks, fall back to top 2 raw scores
+            if elite.empty:
+                candidates = df
+            else:
+                candidates = elite
+            
+            # Sort by Score (Primary) and Momentum Slope (Secondary)
+            sorted_df = candidates.sort_values(by=[score_col, 'Mom Slope %'], ascending=[False, False])
+            return sorted_df.head(2)
+
+        # 3. Get Leaders
+        top_bal = get_top_picks(df_latest, 'Score (Balanced)')
+        top_agg = get_top_picks(df_latest, 'Score (Aggressive)')
+        top_def = get_top_picks(df_latest, 'Score (Defensive)')
+        
+        # 4. Display Cards
+        c1, c2, c3 = st.columns(3)
+        
+        def display_card(container, title, rows, score_col, color_func):
+            container.markdown(f"**{title}**")
+            if rows.empty:
+                container.caption("No data.")
+                return
+
+            for _, row in rows.iterrows():
+                score = int(row[score_col])
+                slope = float(row.get('Mom Slope %', 0))
+                rvol = float(row.get('RVOL', 0))
+                
+                # Dynamic Badges
+                badges = []
+                if score >= 75: badges.append("⭐ Elite")
+                if rvol > 1.5: badges.append("🔥 High Vol")
+                elif rvol > 1.2: badges.append("⚡ Vol")
+                
+                badge_str = " ".join(badges) if badges else ""
+                
+                with container.container(border=True):
+                    st.subheader(f"{row['Ticker']} {badge_str}")
+                    st.metric("Score", f"{score}/100", f"Slope: {slope:+.1f}%")
+                    st.caption(f"RVOL: {rvol:.2f}x Normal")
+                    st.progress(score)
+
+        with c1:
+            display_card(st, "🏆 Balanced (Best Overall)", top_bal, 'Score (Balanced)', lambda x: "blue")
+        
+        with c2:
+            display_card(st, "🚀 Aggressive (Growth+Mom)", top_agg, 'Score (Aggressive)', lambda x: "red")
+                
+        with c3:
+            display_card(st, "🛡️ Defensive (Value+Mom)", top_def, 'Score (Defensive)', lambda x: "green")
+        
+        st.divider()
+   
     # --- TURNAROUND SCANNER ---
     st.markdown("### 🦅 Turnaround Scanner")
     st.caption("Looking for: High Quality (Score > 60) + Broken Trend (Slope < -5%) + Cheap (PEG < 2 or High FCF)")
