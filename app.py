@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.3", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.4", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -29,9 +29,11 @@ SECTOR_ETFS = {
 # --- STRATEGY WEIGHTS ---
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'profitability': 10, 'roe': 5, 'value': 5}
-# Defensive 2.0: Value (35), Quality/Debt (30), Profit/Stability (20), Momentum (15)
-WEIGHTS_DEFENSIVE = {'value': 35, 'roe': 30, 'profitability': 20, 'momentum': 15, 'growth': 0}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
+
+# DEFENSIVE 2.1 (Recession Ready)
+# Value (25), Income/Prof (25), Beta/Growth (25), Solvency/ROE (15), Momentum (10)
+WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
 
 # ==========================================
 # 2. GOOGLE SHEETS DATABASE
@@ -49,7 +51,7 @@ def get_watchlist_data():
 def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
     try:
         existing_df = get_watchlist_data()
-        log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d") # Timezone fix
+        log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
 
         new_data = {
             "Ticker": ticker,
@@ -148,7 +150,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19.3 - HYBRID VALUE)
+# 4. SCORING ENGINE (V19.4)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -182,17 +184,32 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             possible += w
             return f"N/A (0.0/{w})"
 
-    # --- 1. GROWTH ---
-    rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
-    raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
-    base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
-    log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
-
-    # --- 2. PROFITABILITY ---
+    # --- 1. GROWTH (OR BETA FOR DEFENSIVE) ---
     if mode == "Defensive":
-        eps = safe_float(overview.get('EPS'))
-        stability_score = 20 if (eps and eps > 0) else 0
+        # USE GROWTH SLOT FOR BETA (VOLATILITY)
+        beta = safe_float(overview.get('Beta'))
+        raw_metrics['Rev Growth'] = beta # Store in Rev Growth col for DB
+        if beta:
+            # < 0.8 is Great (20pts), > 1.3 is Bad (0pts)
+            base_pts = get_points(beta, 0.8, 1.3, 20, False)
+            log["Volatility (Beta)"] = process_metric("Beta", f"{beta:.2f}", 'growth', base_pts)
+        else:
+            log["Volatility (Beta)"] = process_metric("Beta", "N/A", 'growth', 0)
+    else:
+        # STANDARD REVENUE GROWTH
+        rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+        raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
+        base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
+        log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
+
+    # --- 2. PROFITABILITY (INCOME) ---
+    if mode == "Defensive":
+        # Dividend Yield (Target > 3.0%)
+        div_yield = safe_float(overview.get('DividendYield'))
+        div_yield = div_yield * 100 if div_yield else 0
+        div_score = get_points(div_yield, 3.5, 0.5, 20, True)
         
+        # FCF Yield (Target > 6.0%)
         fcf_yield = None
         fcf_score = 0
         try:
@@ -205,12 +222,12 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                 if ocf and capex and mcap:
                     fcf = ocf - capex
                     fcf_yield = (fcf / mcap) * 100
-                    fcf_score = get_points(fcf_yield, 5.0, 0.0, 20, True)
+                    fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True)
         except: pass
         
-        combined_prof = (stability_score + fcf_score) / 2
+        combined_prof = (div_score + fcf_score) / 2
         raw_metrics['FCF Yield'] = fcf_yield
-        log["Profit Stability"] = process_metric("EPS+FCF", f"EPS: {eps} / FCF: {fcf_yield:.1f}%" if fcf_yield else "N/A", 'profitability', combined_prof)
+        log["Income (Div+FCF)"] = process_metric("Income", f"Div: {div_yield:.1f}% / FCF: {fcf_yield:.1f}%" if fcf_yield else "N/A", 'profitability', combined_prof)
     
     else:
         margin = safe_float(overview.get('ProfitMargin'))
@@ -218,7 +235,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         raw_metrics['Profit Margin'] = margin * 100 if margin else None
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # --- 3. QUALITY / ROE ---
+    # --- 3. QUALITY / ROE (SOLVENCY) ---
     if mode == "Defensive":
         de_ratio = None
         base_solvency = 0
@@ -239,7 +256,8 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                         de_ratio = liab / equity
                         
                 if de_ratio is not None:
-                    base_solvency = get_points(de_ratio, 0.5, 2.0, 20, False)
+                    # Relaxed Scale (0.5 to 3.0) for Defensive
+                    base_solvency = get_points(de_ratio, 0.5, 3.0, 20, False)
         except: pass
         
         raw_metrics['ROE'] = de_ratio 
@@ -251,56 +269,42 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # --- 4. VALUE (GRAPH-MATCHING LOGIC) ---
+    # --- 4. VALUE (HYBRID) ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
 
     if mode == "Defensive":
         val_label = "Hybrid Val"
-        
-        # A. RELATIVE SCORE (50%)
         rel_score = 0
         current_pe = safe_float(overview.get('PERatio'))
         avg_pe = None
         rel_str = "N/A"
         
-        # --- FIX: USE LAST 5 YEARS (MATCHING THE GRAPH) ---
         if historical_pe_df is not None and not historical_pe_df.empty:
-            # 1. Slice to last 5 years (approx 1260 trading days)
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
-            
             if not recent_pe.empty:
-                # 2. Trim Outliers (Remove top/bottom 10% to fix glitches)
-                # This ensures the "Average" matches the visual line, ignoring spikes
                 q_low = recent_pe.quantile(0.10)
                 q_high = recent_pe.quantile(0.90)
                 trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
-                
-                # 3. Calculate Mean of this clean, recent data
-                if not trimmed_pe.empty:
-                    avg_pe = trimmed_pe.mean()
-                else:
-                    avg_pe = recent_pe.mean() # Fallback if trim is too aggressive
-        # ----------------------------------------------------
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+                avg_pe = max(avg_pe, 15.0) 
             
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-            rel_str = f"Prem: {pe_discount:+.0f}% (5Y Avg: {avg_pe:.1f})"
+            rel_str = f"Prem: {pe_discount:+.0f}% (Avg: {avg_pe:.1f})"
         
-        # B. ABSOLUTE SCORE (50%)
         abs_score = 0
         ev_ebitda = safe_float(overview.get('EVToEBITDA'))
         abs_str = "N/A"
-        
         if ev_ebitda:
             abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
             abs_str = f"{ev_ebitda:.1f}x EBITDA"
             val_raw = ev_ebitda 
             
-        # C. COMBINE
         if current_pe and ev_ebitda:
             base_val_pts = (rel_score + abs_score) / 2
             val_str = f"{rel_str} | {abs_str}"
@@ -327,7 +331,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         raw_metrics['PEG'] = val_raw 
         log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
 
-    # --- 5. MOMENTUM ---
+    # --- 5. MOMENTUM (Trend) ---
     pct_diff, slope_pct, rvol = None, None, None
     base_pts = 0
     ma_window = 50 if use_50ma else 200
@@ -369,7 +373,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             base_pts = max(0, base_pts - 2)
             rvol_msg = " - Low Vol"
 
-        trend_status = "Falling" if (slope_pct or 0) < 0 else "Flat" if (slope_pct or 0) < 1 else "Rising"
         val_str = f"Pos: {pct_diff:+.1f}% / Slope: {slope_pct:+.1f}% / RVOL: {rvol:.2f}{rvol_msg}"
     else: val_str = None
 
@@ -426,7 +429,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v19.3 (Hybrid Valuation)")
+st.title("🦅 Alpha Pro v19.4 (Recession Defense Mode)")
 
 with st.sidebar:
     st.header("Settings")
