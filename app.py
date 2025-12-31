@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.6", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.7", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -26,16 +26,11 @@ SECTOR_ETFS = {
     "S&P 500 (SPY)": "SPY"
 }
 
-# --- STRATEGY WEIGHTS (UPDATED v19.6) ---
+# --- STRATEGY WEIGHTS (UNCHANGED KEYS, NEW INTERNAL LOGIC) ---
+# Balanced 2.0: 20% across all 5, but with expanded metrics inside
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
-
-# DEFENSIVE 2.1 (Recession Ready)
-# Value (25), Income/Prof (25), Beta/Growth (25), Solvency/ROE (15), Momentum (10)
 WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
-
-# AGGRESSIVE 2.1 (Strict GARP)
-# Growth (35), Value (25), Prof (20 - Rule of 40), Momentum (20)
 WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 20, 'profitability': 20, 'value': 25, 'roe': 0}
 
 # ==========================================
@@ -153,7 +148,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19.6 - REFINED AGGRESSIVE)
+# 4. SCORING ENGINE (V19.7 - BALANCED 2.0)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -188,26 +183,41 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             return f"N/A (0.0/{w})"
 
     # --- 1. GROWTH ---
+    rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+    raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
+
     if mode == "Defensive":
         # BETA Logic for Defensive
         beta = safe_float(overview.get('Beta'))
-        raw_metrics['Rev Growth'] = beta 
         if beta:
             base_pts = get_points(beta, 0.8, 1.3, 20, False)
             log["Volatility (Beta)"] = process_metric("Beta", f"{beta:.2f}", 'growth', base_pts)
         else:
             log["Volatility (Beta)"] = process_metric("Beta", "N/A", 'growth', 0)
-    else:
-        # REVENUE GROWTH (Critical for Aggressive)
-        rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
-        raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
+            
+    elif mode == "Balanced":
+        # BALANCED 2.0: Rev Growth (50%) + EPS Growth (50%)
+        # EPS Growth provides a check on whether revenue is profitable
+        eps_growth = safe_float(overview.get('QuarterlyEarningsGrowthYOY'))
         
-        # Scoring: Aggressive targets >30%, Balanced >20%
+        rev_score = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
+        eps_score = get_points(eps_growth * 100, 20, 0, 20, True) if eps_growth else 0
+        
+        avg_score = (rev_score + eps_score) / 2
+        val_str = f"Rev: {rev_growth*100:.1f}% / EPS: {eps_growth*100:.1f}%" if eps_growth else f"Rev: {rev_growth*100:.1f}%"
+        
+        log["Growth (Top+Bottom)"] = process_metric("Growth Blend", val_str, 'growth', avg_score)
+        
+    else:
+        # Standard Revenue Growth (Aggressive)
         target_growth = 30 if mode == "Aggressive" else 20
         base_pts = get_points(rev_growth * 100, target_growth, 0, 20, True) if rev_growth else 0
         log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
     # --- 2. PROFITABILITY ---
+    margin = safe_float(overview.get('ProfitMargin'))
+    raw_metrics['Profit Margin'] = margin * 100 if margin else None
+
     if mode == "Defensive":
         # Recession Logic: Div + FCF
         div_yield = safe_float(overview.get('DividendYield'))
@@ -233,11 +243,35 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         raw_metrics['FCF Yield'] = fcf_yield
         log["Income (Div+FCF)"] = process_metric("Income", f"Div: {div_yield:.1f}% / FCF: {fcf_yield:.1f}%" if fcf_yield else "N/A", 'profitability', combined_prof)
     
-    elif mode == "Aggressive":
-        # RULE OF 40 (Growth + FCF Margin)
-        r_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
-        r_growth = r_growth * 100 if r_growth else 0
+    elif mode == "Balanced":
+        # BALANCED 2.0: Net Margin (50%) + FCF Yield (50%)
+        # Checks Accounting Profit vs Real Cash
+        fcf_yield = None
+        fcf_score = 0
+        try:
+            reports = cash_flow.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                ocf = safe_float(latest.get('operatingCashflow'))
+                capex = safe_float(latest.get('capitalExpenditures'))
+                mcap = safe_float(overview.get('MarketCapitalization'))
+                if ocf and capex and mcap:
+                    fcf = ocf - capex
+                    fcf_yield = (fcf / mcap) * 100
+                    fcf_score = get_points(fcf_yield, 5.0, 1.0, 20, True)
+        except: pass
         
+        margin_score = get_points(margin * 100, 25, 5, 20, True) if margin else 0
+        
+        avg_prof = (margin_score + fcf_score) / 2
+        val_str = f"N.Marg: {margin*100:.1f}% / FCF: {fcf_yield:.1f}%" if fcf_yield else f"N.Marg: {margin*100:.1f}%"
+        
+        raw_metrics['FCF Yield'] = fcf_yield
+        log["Profit (Acc+Cash)"] = process_metric("Profit Blend", val_str, 'profitability', avg_prof)
+        
+    elif mode == "Aggressive":
+        # RULE OF 40 Logic (As before)
+        r_growth = rev_growth * 100 if rev_growth else 0
         fcf_margin = 0
         try:
             reports = cash_flow.get('annualReports', [])
@@ -246,27 +280,26 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                 ocf = safe_float(latest.get('operatingCashflow'))
                 capex = safe_float(latest.get('capitalExpenditures'))
                 rev_annual = safe_float(overview.get('RevenueTTM')) 
-                
                 if ocf and capex and rev_annual and rev_annual > 0:
                     fcf = ocf - capex
                     fcf_margin = (fcf / rev_annual) * 100
         except: pass
-        
         rule_40 = r_growth + fcf_margin
         base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
-        
-        raw_metrics['Profit Margin'] = fcf_margin 
         log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f}", 'profitability', base_rule_pts)
 
     else:
-        # Standard Net Margin
-        margin = safe_float(overview.get('ProfitMargin'))
+        # Speculative (Net Margin)
         base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
-        raw_metrics['Profit Margin'] = margin * 100 if margin else None
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
     # --- 3. QUALITY / ROE ---
+    roe = safe_float(overview.get('ReturnOnEquityTTM'))
+    if roe and roe < 5: roe = roe * 100 
+    raw_metrics['ROE'] = roe
+    
     if mode == "Defensive":
+        # Solvency Logic (As before)
         de_ratio = None
         base_solvency = 0
         try:
@@ -277,27 +310,31 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                 short_debt = safe_float(latest.get('shortTermDebt')) or 0
                 long_debt = safe_float(latest.get('longTermDebt')) or 0
                 total_financial_debt = short_debt + long_debt
-                
                 if total_financial_debt > 0 and equity and equity > 0:
                     de_ratio = total_financial_debt / equity
                 else:
                     liab = safe_float(latest.get('totalLiabilities'))
                     if liab and equity and equity > 0:
                         de_ratio = liab / equity
-                        
                 if de_ratio is not None:
-                    # Relaxed Scale (0.5 to 3.0) for Defensive
                     base_solvency = get_points(de_ratio, 0.5, 3.0, 20, False)
         except: pass
-        
-        raw_metrics['ROE'] = de_ratio 
         log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
+
+    elif mode == "Balanced":
+        # BALANCED 2.0: Use Return on Assets (ROA)
+        # ROA is harder to manipulate with debt than ROE. It measures pure efficiency.
+        roa = safe_float(overview.get('ReturnOnAssetsTTM'))
+        roa = roa * 100 if roa else 0
         
+        # Target: > 10% ROA is Elite, < 2% is Weak
+        roa_score = get_points(roa, 10.0, 2.0, 20, True)
+        
+        # We still show ROE for context, but score on ROA
+        log["Quality (ROA)"] = process_metric("ROA", f"{roa:.1f}% (ROE: {roe:.1f}%)", 'roe', roa_score)
+
     else:
-        # Standard ROE (Aggressive usually ignores this via weights)
-        roe = safe_float(overview.get('ReturnOnEquityTTM'))
-        if roe and roe < 5: roe = roe * 100 
-        raw_metrics['ROE'] = roe
+        # Standard ROE
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
@@ -313,7 +350,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         current_pe = safe_float(overview.get('PERatio'))
         avg_pe = None
         rel_str = "N/A"
-        
         if historical_pe_df is not None and not historical_pe_df.empty:
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
@@ -324,12 +360,10 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                 if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
                 else: avg_pe = recent_pe.mean()
                 avg_pe = max(avg_pe, 15.0) 
-            
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-            rel_str = f"Prem: {pe_discount:+.0f}% (Avg: {avg_pe:.1f})"
-        
+            rel_str = f"Prem: {pe_discount:+.0f}%"
         abs_score = 0
         ev_ebitda = safe_float(overview.get('EVToEBITDA'))
         abs_str = "N/A"
@@ -337,7 +371,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
             abs_str = f"{ev_ebitda:.1f}x EBITDA"
             val_raw = ev_ebitda 
-            
         if current_pe and ev_ebitda:
             base_val_pts = (rel_score + abs_score) / 2
             val_str = f"{rel_str} | {abs_str}"
@@ -347,20 +380,16 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         else:
             base_val_pts = 0
             val_str = "Data Missing"
-            
         raw_metrics['PEG'] = val_raw
         log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
         
     elif mode == "Aggressive":
-        # --- NEW AGGRESSIVE VALUE (1/3 Rel P/E + 2/3 EV/Sales) ---
+        # Hybrid Growth (1/3 Rel P/E + 2/3 EV/Sales)
         val_label = "Hybrid Growth"
-        
-        # 1. Rel P/E (1/3 Weight)
         rel_pe_score = 0
         current_pe = safe_float(overview.get('PERatio'))
         avg_pe = None
         rel_str = "N/A"
-        
         if historical_pe_df is not None and not historical_pe_df.empty:
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
@@ -370,41 +399,64 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                 trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
                 if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
                 else: avg_pe = recent_pe.mean()
-        
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_pe_score = get_points(pe_discount, 5.0, -50.0, 20, True)
             rel_str = f"PE Prem: {pe_discount:+.0f}%"
-
-        # 2. EV/Sales (2/3 Weight)
         ev_sales = safe_float(overview.get('EVToRevenue'))
         ev_score = 0
         ev_str = "N/A"
-        
         if ev_sales:
-            # Scale: <5x is Cheap (20), >15x is Expensive (0)
             ev_score = get_points(ev_sales, 5.0, 15.0, 20, False)
             ev_str = f"{ev_sales:.1f}x Sales"
-        
-        # 3. Combine (0.33 vs 0.67)
         if current_pe and avg_pe and ev_sales:
             base_val_pts = (rel_pe_score * 0.33) + (ev_score * 0.67)
             val_str = f"{rel_str} | {ev_str}"
             val_raw = ev_sales
         elif ev_sales:
-            # Fallback if no P/E history (common for growth)
             base_val_pts = ev_score
             val_str = f"{ev_str} (Sales Only)"
             val_raw = ev_sales
         else:
             base_val_pts = 0
             val_str = "Data Missing"
-        
         raw_metrics['PEG'] = val_raw 
         log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
+    
+    elif mode == "Balanced":
+        # BALANCED 2.0: PEG Ratio + Relative P/E
+        # Combines "Growth at Reasonable Price" with "Historical Discount"
+        val_label = "Hybrid PEG"
+        
+        # 1. PEG Ratio (50%)
+        peg = safe_float(overview.get('PEGRatio'))
+        peg_score = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
+        
+        # 2. Relative P/E (50%)
+        rel_score = 0
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            if not recent_pe.empty:
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+        
+        avg_val_pts = (peg_score + rel_score) / 2
+        val_str = f"PEG: {peg:.2f} | Prem: {pe_discount:+.0f}%" if (peg and current_pe and avg_pe) else f"PEG: {peg:.2f}"
+        
+        raw_metrics['PEG'] = peg
+        log["Valuation (PEG+Rel)"] = process_metric(val_label, val_str, 'value', avg_val_pts)
 
     else:
-        # Balanced/Speculative Logic (Standard PEG)
+        # Speculative (Standard PEG)
         val_label = "PEG"
         val_raw = safe_float(overview.get('PEGRatio'))
         base_val_pts = get_points(val_raw, 1.0, 2.5, 20, False) if val_raw else 0
@@ -420,10 +472,8 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     val_str = "N/A"
     
     if mode == "Defensive":
-        # Volatility (Beta) is stored in the "Growth" slot for Defensive, so Mom is standard Trend here
-        pass # Logic handled below is standard trend
+        pass 
         
-    # STANDARD MOMENTUM (Used by All Modes)
     if not price_df.empty and len(price_df) > required_history:
         curr_price = price_df['close'].iloc[-1]
         ma_now = price_df['close'].rolling(window=ma_window).mean().iloc[-1]
@@ -514,7 +564,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v19.6 (GARP + Defensive)")
+st.title("🦅 Alpha Pro v19.7 (Balanced 2.0)")
 
 with st.sidebar:
     st.header("Settings")
@@ -576,13 +626,11 @@ with t1:
                 historical_pe_df=pe_hist
             )
             
-            # DB Prep (Runs all 4 modes for the log)
+            # DB Prep
             _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
-            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
-            
-            # For Aggressive DB log, we need to run it properly to get Rule of 40 score
+            # Force proper recalculation for DB logging
+            s_bal, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
             s_agg, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-            
             s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
             
@@ -660,9 +708,9 @@ with t2:
                         hist, ov, cf, bs = get_alpha_data(t, key)
                         pe_hist = get_historical_pe(t, key, hist)
                         if not hist.empty and ov:
+                            # DB Re-Calc logic
                             _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
-                            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
-                            
+                            s_bal, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
                             s_agg, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
                             s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
                             s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
