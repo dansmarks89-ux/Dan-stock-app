@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.9", layout="wide")
+st.set_page_config(page_title="Alpha Pro v20.0", layout="wide")
 
 # ETF Map for Sector Analysis
 SECTOR_ETFS = {
@@ -28,16 +28,9 @@ SECTOR_ETFS = {
 }
 
 # --- STRATEGY WEIGHTS ---
-# Balanced 2.0: Quality at a Reasonable Price (QARP)
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
-
-# Speculative: Pure Momentum & Hype
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
-
-# Defensive 2.1: Recession Ready (High Dividend, Low Beta)
 WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
-
-# Aggressive 2.1: Growth at a Reasonable Price (GARP)
 WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 20, 'profitability': 20, 'value': 25, 'roe': 0}
 
 # ==========================================
@@ -46,12 +39,8 @@ WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 20, 'profitability': 20, 'value'
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_watchlist_data():
-    """
-    Robust fetcher that handles empty sheets or connection errors without crashing.
-    """
     try:
         df = conn.read(worksheet="Sheet1", ttl=0)
-        # Check if the sheet is empty or missing headers
         if df.empty or 'Ticker' not in df.columns:
             return pd.DataFrame()
         df = df.dropna(subset=['Ticker'])
@@ -60,9 +49,6 @@ def get_watchlist_data():
         return pd.DataFrame()
 
 def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
-    """
-    Logs data to Google Sheets, updating if the ticker already exists for today.
-    """
     try:
         existing_df = get_watchlist_data()
         log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
@@ -88,7 +74,6 @@ def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
         new_row = pd.DataFrame([new_data])
         
         if not existing_df.empty:
-            # If ticker exists for today, remove it so we can overwrite/update it
             mask = (existing_df['Ticker'] == ticker) & (existing_df['Date'] == log_date)
             if not existing_df[mask].empty:
                 existing_df = existing_df[~mask]
@@ -121,22 +106,13 @@ def safe_float(val):
 
 @st.cache_data(ttl=3600)
 def get_alpha_data(ticker, api_key):
-    """Fetches Overview, Cash Flow, Balance Sheet, and Daily Price Data"""
     base = "https://www.alphavantage.co/query"
-    
-    # 1. Company Overview
     try: r_ov = requests.get(f"{base}?function=OVERVIEW&symbol={ticker}&apikey={api_key}").json()
     except: r_ov = {}
-    
-    # 2. Cash Flow
     try: r_cf = requests.get(f"{base}?function=CASH_FLOW&symbol={ticker}&apikey={api_key}").json()
     except: r_cf = {}
-    
-    # 3. Balance Sheet
     try: r_bs = requests.get(f"{base}?function=BALANCE_SHEET&symbol={ticker}&apikey={api_key}").json()
     except: r_bs = {}
-    
-    # 4. Daily Price Data
     try:
         r_price = requests.get(f"{base}?function=TIME_SERIES_DAILY_ADJUSTED&symbol={ticker}&outputsize=full&apikey={api_key}").json()
         ts = r_price.get('Time Series (Daily)', {})
@@ -145,53 +121,38 @@ def get_alpha_data(ticker, api_key):
             df = df.astype(float)
             df.index = pd.to_datetime(df.index)
             df = df.sort_index()
-            # Normalize column names
             if '5. adjusted close' in df.columns: df = df.rename(columns={'5. adjusted close': 'close'})
             else: df = df.rename(columns={'4. close': 'close'})
             if '6. volume' in df.columns: df = df.rename(columns={'6. volume': 'volume'})
             elif '5. volume' in df.columns: df = df.rename(columns={'5. volume': 'volume'})
-        else:
-            df = pd.DataFrame()
-    except: 
-        df = pd.DataFrame()
-        
+        else: df = pd.DataFrame()
+    except: df = pd.DataFrame()
     return df, r_ov, r_cf, r_bs
 
 @st.cache_data(ttl=3600)
 def get_historical_pe(ticker, api_key, price_df):
-    """Calculates Historical P/E Ratios for the last 5 years"""
     if price_df.empty: return pd.DataFrame()
     base = "https://www.alphavantage.co/query"
     try:
         url = f"{base}?function=EARNINGS&symbol={ticker}&apikey={api_key}"
         data = requests.get(url).json()
         q_earnings = data.get('quarterlyEarnings', [])
-        
         if not q_earnings: return pd.DataFrame()
-        
         eps_df = pd.DataFrame(q_earnings)
         eps_df['fiscalDateEnding'] = pd.to_datetime(eps_df['fiscalDateEnding'])
         eps_df['reportedEPS'] = pd.to_numeric(eps_df['reportedEPS'], errors='coerce')
         eps_df = eps_df.set_index('fiscalDateEnding').sort_index()
-        
-        # Calculate TTM EPS
         eps_df['ttm_eps'] = eps_df['reportedEPS'].rolling(window=4).sum()
-        
-        # Merge Price with Earnings
         merged = pd.merge_asof(price_df, eps_df['ttm_eps'], left_index=True, right_index=True, direction='backward')
         merged['pe_ratio'] = merged['close'] / merged['ttm_eps']
-        
-        # Filter for realistic P/E ranges
         merged = merged[(merged['pe_ratio'] > 0) & (merged['pe_ratio'] < 300)]
         return merged[['pe_ratio']]
-    except: 
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19.9 - FULL LOGIC)
+# 4. SCORING ENGINE (V20.0 - ULTIMATE)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
-    """Linear interpolation scoring helper"""
     if val is None: return 0
     if high_is_good:
         if val >= best: return max_pts
@@ -201,6 +162,25 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
         if val <= best: return max_pts
         if val >= worst: return 0
         return round(((worst - val)/(worst - best)) * max_pts, 1)
+
+# --- NEW HELPER: ADVANCED INCOME METRICS ---
+def get_advanced_income_metrics(cash_flow_data, mcap_int):
+    metrics = {"payout_ratio": None, "shareholder_yield": None}
+    try:
+        reports = cash_flow_data.get('annualReports', [])
+        if len(reports) >= 1:
+            latest = reports[0]
+            # 1. Shareholder Yield (Divs + Buybacks)
+            divs_paid = safe_float(latest.get('dividendPayout')) or 0
+            buybacks = abs(safe_float(latest.get('paymentsForRepurchaseOfCommonStock')) or 0)
+            if mcap_int and mcap_int > 0:
+                metrics["shareholder_yield"] = ((divs_paid + buybacks) / mcap_int) * 100
+            # 2. Payout Ratio (Divs / Net Income)
+            net_income = safe_float(latest.get('netIncome'))
+            if net_income and net_income > 0:
+                metrics["payout_ratio"] = (divs_paid / net_income) * 100
+    except: pass
+    return metrics
 
 def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weights, use_50ma=False, mode="Balanced", historical_pe_df=None):
     earned, possible = 0, 0
@@ -224,18 +204,14 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             
     # --- HELPER: GET FCF (Annual with Quarterly Fallback) ---
     def get_fcf_ttm(cash_flow_data):
-        # 1. Try Annual First
         try:
             reports = cash_flow_data.get('annualReports', [])
             if reports:
                 latest = reports[0]
                 ocf = safe_float(latest.get('operatingCashflow'))
                 capex = safe_float(latest.get('capitalExpenditures'))
-                if ocf is not None and capex is not None:
-                    return ocf - capex
+                if ocf is not None and capex is not None: return ocf - capex
         except: pass
-        
-        # 2. Fallback: Sum last 4 Quarters
         try:
             q_reports = cash_flow_data.get('quarterlyReports', [])
             if len(q_reports) >= 4:
@@ -246,7 +222,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                     ttm_capex += safe_float(q_reports[i].get('capitalExpenditures')) or 0
                 return ttm_ocf - ttm_capex
         except: pass
-        
         return None
 
     # --- 1. GROWTH ---
@@ -278,63 +253,67 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     margin = safe_float(overview.get('ProfitMargin'))
     raw_metrics['Profit Margin'] = margin * 100 if margin else None
 
-    # Calculate FCF Yield once here to use in all modes
     fcf_val = get_fcf_ttm(cash_flow)
     mcap = safe_float(overview.get('MarketCapitalization'))
     fcf_yield = None
     if fcf_val is not None and mcap and mcap > 0:
         fcf_yield = (fcf_val / mcap) * 100
     
-    raw_metrics['FCF Yield'] = fcf_yield # Store for DB
+    raw_metrics['FCF Yield'] = fcf_yield 
 
     if mode == "Defensive":
+        # ADVANCED INCOME METRICS (Shareholder Yield + Payout Safety)
+        adv_metrics = get_advanced_income_metrics(cash_flow, mcap)
+        
         div_yield = safe_float(overview.get('DividendYield'))
         div_yield = div_yield * 100 if div_yield else 0
+        
+        # Shareholder Yield
+        shareholder_yield = adv_metrics.get("shareholder_yield")
+        sy_score = get_points(shareholder_yield, 5.0, 0.0, 20, True) if shareholder_yield else 0
+        
+        # Payout Penalty
+        payout = adv_metrics.get("payout_ratio")
+        safety_penalty = 1.0
+        if payout and payout > 90:
+            safety_penalty = 0.5
+            log["Safety Warning"] = f"Payout Ratio {payout:.0f}% (>90%)"
+            
+        fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True) if fcf_yield is not None else 0
         div_score = get_points(div_yield, 3.5, 0.5, 20, True)
         
-        fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True) if fcf_yield is not None else 0
-        
         # Max Logic
-        blend_score = (div_score + fcf_score) / 2
-        final_prof_score = max(fcf_score, blend_score)
+        best_income_score = max(fcf_score, div_score, sy_score) * safety_penalty
         
-        # Safe String Formatting
-        fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
-        
-        if fcf_score > blend_score:
-             msg = f"FCF: {fcf_str} (Div Ignored)"
+        # Log Logic
+        if shareholder_yield and shareholder_yield > div_yield + 1:
+             msg = f"Yld: {div_yield:.1f}% | Total: {shareholder_yield:.1f}% (Buybacks!)"
         else:
-             msg = f"Div: {div_yield:.1f}% / FCF: {fcf_str}"
+             fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
+             msg = f"Yld: {div_yield:.1f}% / FCF: {fcf_str}"
              
-        log["Income (Smart Yield)"] = process_metric("Income", msg, 'profitability', final_prof_score)
+        log["Income (Smart)"] = process_metric("Total Yield", msg, 'profitability', best_income_score)
     
     elif mode == "Balanced":
         fcf_score = get_points(fcf_yield, 5.0, 1.0, 20, True) if fcf_yield is not None else 0
         margin_score = get_points(margin * 100, 25, 5, 20, True) if margin else 0
-        
         avg_prof = (margin_score * 0.3) + (fcf_score * 0.7)
-        
         fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
         val_str = f"N.Marg: {margin*100:.1f}% / FCF: {fcf_str}"
-        
         log["Profit (Cash Heavy)"] = process_metric("Profit Blend", val_str, 'profitability', avg_prof)
         
     elif mode == "Aggressive":
         r_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
         r_growth = r_growth * 100 if r_growth else 0
-        
         fcf_margin = 0
         rev_annual = safe_float(overview.get('RevenueTTM')) 
-        
         if fcf_val is not None and rev_annual and rev_annual > 0:
             fcf_margin = (fcf_val / rev_annual) * 100
         else:
-            # Last ditch fallback to Net Income if FCF fails completely
             try:
                 net_income = safe_float(cash_flow.get('annualReports', [])[0].get('netIncome'))
                 if net_income and rev_annual: fcf_margin = (net_income / rev_annual) * 100
             except: pass
-
         rule_40 = r_growth + fcf_margin
         base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
         raw_metrics['Profit Margin'] = fcf_margin 
@@ -596,7 +575,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP UI
 # ==========================================
-st.title("🦅 Alpha Pro v19.9 (Batch & Scanner)")
+st.title("🦅 Alpha Pro v20.0 (Ultimate)")
 
 with st.sidebar:
     st.header("Settings")
@@ -738,8 +717,6 @@ with t2:
     st.header("Watchlist Trends")
     df_wl = st.session_state.watchlist_df
     
-    #  <--- PASTE THE NEW "TOP PICKS" CODE RIGHT HERE (Lines 1-49 below) --->
-    
     # --- TOP PICKS DASHBOARD (ELITE MOMENTUM) ---
     if not df_wl.empty and 'Ticker' in df_wl.columns:
         st.markdown("### 🏆 Daily Top Picks (Elite > 75)")
@@ -808,7 +785,7 @@ with t2:
             display_card(st, "🛡️ Defensive (Value+Mom)", top_def, 'Score (Defensive)', lambda x: "green")
         
         st.divider()
-   
+    
     # --- TURNAROUND SCANNER ---
     st.markdown("### 🦅 Turnaround Scanner")
     st.caption("Looking for: High Quality (Score > 60) + Broken Trend (Slope < -5%) + Cheap (PEG < 2 or High FCF)")
