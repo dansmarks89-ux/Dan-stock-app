@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.4", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.5", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -26,14 +26,16 @@ SECTOR_ETFS = {
     "S&P 500 (SPY)": "SPY"
 }
 
-# --- STRATEGY WEIGHTS ---
+# --- STRATEGY WEIGHTS (UPDATED v19.5) ---
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
-WEIGHTS_AGGRESSIVE = {'growth': 40, 'momentum': 40, 'profitability': 10, 'roe': 5, 'value': 5}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
 # DEFENSIVE 2.1 (Recession Ready)
-# Value (25), Income/Prof (25), Beta/Growth (25), Solvency/ROE (15), Momentum (10)
 WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
+
+# AGGRESSIVE 2.0 (GARP Mode)
+# Growth (35), Mom (25), Prof (20 - Rule of 40), Value (20 - Hybrid)
+WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 25, 'profitability': 20, 'value': 20, 'roe': 0}
 
 # ==========================================
 # 2. GOOGLE SHEETS DATABASE
@@ -150,7 +152,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19.4)
+# 4. SCORING ENGINE (V19.5 - AGGRESSIVE GARP)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -184,32 +186,33 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             possible += w
             return f"N/A (0.0/{w})"
 
-    # --- 1. GROWTH (OR BETA FOR DEFENSIVE) ---
+    # --- 1. GROWTH ---
     if mode == "Defensive":
-        # USE GROWTH SLOT FOR BETA (VOLATILITY)
+        # BETA Logic for Defensive
         beta = safe_float(overview.get('Beta'))
-        raw_metrics['Rev Growth'] = beta # Store in Rev Growth col for DB
+        raw_metrics['Rev Growth'] = beta 
         if beta:
-            # < 0.8 is Great (20pts), > 1.3 is Bad (0pts)
             base_pts = get_points(beta, 0.8, 1.3, 20, False)
             log["Volatility (Beta)"] = process_metric("Beta", f"{beta:.2f}", 'growth', base_pts)
         else:
             log["Volatility (Beta)"] = process_metric("Beta", "N/A", 'growth', 0)
     else:
-        # STANDARD REVENUE GROWTH
+        # REVENUE GROWTH (Critical for Aggressive)
         rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
         raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
-        base_pts = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
+        
+        # Scoring: Aggressive targets >30%, Balanced >20%
+        target_growth = 30 if mode == "Aggressive" else 20
+        base_pts = get_points(rev_growth * 100, target_growth, 0, 20, True) if rev_growth else 0
         log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
 
-    # --- 2. PROFITABILITY (INCOME) ---
+    # --- 2. PROFITABILITY ---
     if mode == "Defensive":
-        # Dividend Yield (Target > 3.0%)
+        # Recession Logic: Div + FCF
         div_yield = safe_float(overview.get('DividendYield'))
         div_yield = div_yield * 100 if div_yield else 0
         div_score = get_points(div_yield, 3.5, 0.5, 20, True)
         
-        # FCF Yield (Target > 6.0%)
         fcf_yield = None
         fcf_score = 0
         try:
@@ -229,13 +232,39 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         raw_metrics['FCF Yield'] = fcf_yield
         log["Income (Div+FCF)"] = process_metric("Income", f"Div: {div_yield:.1f}% / FCF: {fcf_yield:.1f}%" if fcf_yield else "N/A", 'profitability', combined_prof)
     
+    elif mode == "Aggressive":
+        # RULE OF 40 (Growth + FCF Margin)
+        r_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+        r_growth = r_growth * 100 if r_growth else 0
+        
+        fcf_margin = 0
+        try:
+            reports = cash_flow.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                ocf = safe_float(latest.get('operatingCashflow'))
+                capex = safe_float(latest.get('capitalExpenditures'))
+                rev_annual = safe_float(overview.get('RevenueTTM')) 
+                
+                if ocf and capex and rev_annual and rev_annual > 0:
+                    fcf = ocf - capex
+                    fcf_margin = (fcf / rev_annual) * 100
+        except: pass
+        
+        rule_40 = r_growth + fcf_margin
+        base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
+        
+        raw_metrics['Profit Margin'] = fcf_margin 
+        log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f}", 'profitability', base_rule_pts)
+
     else:
+        # Standard Net Margin
         margin = safe_float(overview.get('ProfitMargin'))
         base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
         raw_metrics['Profit Margin'] = margin * 100 if margin else None
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # --- 3. QUALITY / ROE (SOLVENCY) ---
+    # --- 3. QUALITY / ROE ---
     if mode == "Defensive":
         de_ratio = None
         base_solvency = 0
@@ -256,25 +285,26 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
                         de_ratio = liab / equity
                         
                 if de_ratio is not None:
-                    # Relaxed Scale (0.5 to 3.0) for Defensive
                     base_solvency = get_points(de_ratio, 0.5, 3.0, 20, False)
         except: pass
-        
         raw_metrics['ROE'] = de_ratio 
         log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
+        
     else:
+        # Standard ROE (Aggressive usually ignores this via weights)
         roe = safe_float(overview.get('ReturnOnEquityTTM'))
         if roe and roe < 5: roe = roe * 100 
         raw_metrics['ROE'] = roe
         base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
 
-    # --- 4. VALUE (HYBRID) ---
+    # --- 4. VALUE ---
     val_label = "PEG"
     val_raw = None
     base_val_pts = 0
 
     if mode == "Defensive":
+        # Hybrid (Rel P/E + EBITDA)
         val_label = "Hybrid Val"
         rel_score = 0
         current_pe = safe_float(overview.get('PERatio'))
@@ -317,21 +347,69 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
             
         raw_metrics['PEG'] = val_raw
         log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
+        
+    elif mode == "Aggressive":
+        # --- NEW AGGRESSIVE VALUE (1/3 Rel P/E + 2/3 EV/Sales) ---
+        val_label = "Hybrid Growth"
+        
+        # 1. Rel P/E (1/3 Weight)
+        rel_pe_score = 0
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        rel_str = "N/A"
+        
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            # Use same logic as Defensive for extracting Mean P/E
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            if not recent_pe.empty:
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+        
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            rel_pe_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+            rel_str = f"PE Prem: {pe_discount:+.0f}%"
+
+        # 2. EV/Sales (2/3 Weight)
+        ev_sales = safe_float(overview.get('EVToRevenue'))
+        ev_score = 0
+        ev_str = "N/A"
+        
+        if ev_sales:
+            # Scale: <5x is Cheap (20), >15x is Expensive (0)
+            ev_score = get_points(ev_sales, 5.0, 15.0, 20, False)
+            ev_str = f"{ev_sales:.1f}x Sales"
+        
+        # 3. Combine (0.33 vs 0.67)
+        if current_pe and avg_pe and ev_sales:
+            base_val_pts = (rel_pe_score * 0.33) + (ev_score * 0.67)
+            val_str = f"{rel_str} | {ev_str}"
+            val_raw = ev_sales
+        elif ev_sales:
+            # Fallback if no P/E history (common for growth)
+            base_val_pts = ev_score
+            val_str = f"{ev_str} (Sales Only)"
+            val_raw = ev_sales
+        else:
+            base_val_pts = 0
+            val_str = "Data Missing"
+        
+        raw_metrics['PEG'] = val_raw 
+        log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
 
     else:
-        if mode == "Aggressive":
-            val_label = "EV/Sales"
-            val_raw = safe_float(overview.get('EVToRevenue'))
-            base_val_pts = get_points(val_raw, 3.0, 12.0, 20, False) if val_raw else 0
-        else:
-            val_label = "PEG"
-            val_raw = safe_float(overview.get('PEGRatio'))
-            base_val_pts = get_points(val_raw, 1.0, 2.5, 20, False) if val_raw else 0
-        
+        # Balanced/Speculative Logic (Standard PEG)
+        val_label = "PEG"
+        val_raw = safe_float(overview.get('PEGRatio'))
+        base_val_pts = get_points(val_raw, 1.0, 2.5, 20, False) if val_raw else 0
         raw_metrics['PEG'] = val_raw 
         log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
 
-    # --- 5. MOMENTUM (Trend) ---
+    # --- 5. MOMENTUM ---
     pct_diff, slope_pct, rvol = None, None, None
     base_pts = 0
     ma_window = 50 if use_50ma else 200
@@ -339,6 +417,11 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
     required_history = ma_window + slope_lookback + 5
     val_str = "N/A"
     
+    if mode == "Defensive":
+        # Volatility (Beta) is stored in the "Growth" slot for Defensive, so Mom is standard Trend here
+        pass # Logic handled below is standard trend
+        
+    # STANDARD MOMENTUM (Used by All Modes)
     if not price_df.empty and len(price_df) > required_history:
         curr_price = price_df['close'].iloc[-1]
         ma_now = price_df['close'].rolling(window=ma_window).mean().iloc[-1]
@@ -375,7 +458,7 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
 
         val_str = f"Pos: {pct_diff:+.1f}% / Slope: {slope_pct:+.1f}% / RVOL: {rvol:.2f}{rvol_msg}"
     else: val_str = None
-
+    
     raw_metrics['Mom Position'] = pct_diff
     raw_metrics['Mom Slope'] = slope_pct
     raw_metrics['RVOL'] = rvol
@@ -394,279 +477,3 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
 
     score = int((earned/possible)*100) if possible > 0 else 0
     return score, log, raw_metrics, base_scores
-
-def compute_weighted_score(base_scores, weights):
-    earned = 0
-    possible = 0
-    for key, weight in weights.items():
-        if key in base_scores:
-            pts = (base_scores[key] / 20) * weight
-            earned += pts
-            possible += weight
-    return int((earned/possible)*100) if possible > 0 else 0
-
-# ==========================================
-# 5. UI HELPERS & PLOTTING
-# ==========================================
-def tf_selector(key_suffix):
-    c_tf = st.columns(4)
-    tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
-    choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
-    return tf_map[choice]
-
-def plot_dual_axis(price_df, pe_df, title, days):
-    cutoff = price_df.index[-1] - timedelta(days=days)
-    p_sub = price_df[price_df.index >= cutoff]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=p_sub.index, y=p_sub['close'], name="Price ($)", line=dict(color='#00CC96', width=2)))
-    if not pe_df.empty:
-        pe_sub = pe_df[pe_df.index >= cutoff]
-        if not pe_sub.empty:
-            fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
-    fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig, use_container_width=True)
-
-# ==========================================
-# 6. MAIN APP
-# ==========================================
-st.title("🦅 Alpha Pro v19.4 (Recession Defense Mode)")
-
-with st.sidebar:
-    st.header("Settings")
-    if "AV_KEY" in st.secrets: key = st.secrets["AV_KEY"]
-    else: 
-        key = ""
-        st.warning("⚠️ AV_KEY missing")
-    
-    is_premium = st.checkbox("🔑 I have a Premium API Key")
-    if is_premium: st.success("Premium Mode Active")
-    else: st.info("Free Mode: Delays Active")
-    
-    st.subheader("🧠 Strategy Mode")
-    strategy = st.radio("Market Phase", ["Balanced", "Aggressive Growth", "Defensive / Cyclical", "Speculative / Hype"])
-    
-    is_speculative = False
-    mode_name = "Balanced"
-    
-    if "Aggressive" in strategy:
-        active_weights = WEIGHTS_AGGRESSIVE
-        mode_name = "Aggressive"
-    elif "Defensive" in strategy:
-        active_weights = WEIGHTS_DEFENSIVE
-        mode_name = "Defensive"
-    elif "Speculative" in strategy:
-        active_weights = WEIGHTS_SPECULATIVE
-        mode_name = "Speculative"
-        is_speculative = True
-    else:
-        active_weights = WEIGHTS_BALANCED
-        mode_name = "Balanced"
-
-    if 'watchlist_df' not in st.session_state:
-        st.session_state.watchlist_df = get_watchlist_data()
-    
-    st.markdown("---")
-    if not st.session_state.watchlist_df.empty and 'Ticker' in st.session_state.watchlist_df.columns:
-        unique_tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
-    else: unique_tickers = []
-    st.info(f"Tracking {len(unique_tickers)} Stocks")
-
-t1, t2, t3 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows"])
-
-with t1:
-    c1, c2 = st.columns([3, 1])
-    tick = c1.text_input("Analyze Ticker", "AAPL").upper()
-    
-    if tick and key:
-        with st.spinner("Fetching Data..."):
-            hist, ov, cf, bs = get_alpha_data(tick, key)
-            pe_hist = get_historical_pe(tick, key, hist)
-            
-        if not hist.empty and ov:
-            # Main Score
-            score, log, raw_metrics, base_scores = calculate_dynamic_score(
-                ov, cf, bs, hist, active_weights, 
-                use_50ma=is_speculative, 
-                mode=mode_name,
-                historical_pe_df=pe_hist
-            )
-            
-            # DB Prep
-            _, _, _, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
-            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
-            s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-            s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-            
-            curr_price = hist['close'].iloc[-1]
-            if len(hist) > 1: day_delta = curr_price - hist['close'].iloc[-2]
-            else: day_delta = 0
-            
-            pe_now = safe_float(ov.get('PERatio', 0))
-            short_float = safe_float(ov.get('ShortPercentFloat'))
-            short_ratio = safe_float(ov.get('ShortRatio'))
-            if not short_float:
-                shares_short = safe_float(ov.get('SharesShort'))
-                shares_out = safe_float(ov.get('SharesOutstanding'))
-                if shares_short and shares_out and shares_out > 0:
-                    short_float = shares_short / shares_out
-            
-            st.markdown(f"## {tick} - {ov.get('Name')}")
-            k0, k1, k2, k3, k4 = st.columns(5)
-            k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
-            k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
-            if short_float: k2.metric("Short Int", f"{short_float*100:.2f}%")
-            elif short_ratio: k2.metric("Short Ratio", f"{short_ratio:.1f} Days")
-            else: k2.metric("Short Info", "N/A")
-            if pe_now: k3.metric("P/E (TTM)", f"{pe_now:.2f}")
-            else: k3.metric("P/E (TTM)", "N/A")
-            fcf_val = raw_metrics.get('FCF Yield')
-            k4.metric("FCF Yield", f"{fcf_val:.2f}%" if fcf_val else "N/A")
-            
-            col_metrics, col_chart = st.columns([1, 2])
-            with col_metrics:
-                st.metric(f"Score ({mode_name})", f"{score}/100")
-                df_log = pd.DataFrame(list(log.items()), columns=["Metric", "Details"])
-                st.dataframe(df_log, hide_index=True, use_container_width=True)
-                if st.button("⭐ Log to Cloud Watchlist"):
-                    success = add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
-                    if success:
-                        st.success(f"Logged {tick}!")
-                        st.session_state.watchlist_df = get_watchlist_data()
-            
-            with col_chart:
-                days = tf_selector("ind")
-                plot_dual_axis(hist, pe_hist, f"{tick}: Price vs Valuation (P/E)", days)
-        else:
-            st.error("Data Unavailable.")
-
-with t2:
-    st.header("Watchlist Trends")
-    df_wl = st.session_state.watchlist_df
-    if df_wl.empty or 'Ticker' not in df_wl.columns:
-        st.info("Watchlist is empty.")
-    else:
-        unique_list = df_wl['Ticker'].unique()
-        for t in unique_list:
-            history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
-            latest = history.iloc[-1]
-            st.subheader(f"{t} Analysis")
-            score_cols = [c for c in history.columns if 'Score (' in c]
-            if score_cols and len(history) > 1:
-                fig = px.line(history, x='Date', y=score_cols, markers=True)
-                fig.update_layout(height=300, yaxis_title="Score")
-                st.plotly_chart(fig, use_container_width=True)
-            c_metrics, c_actions = st.columns([4, 1])
-            with c_metrics:
-                cols = st.columns(4)
-                if 'Score (Balanced)' in latest: cols[0].metric("Bal", int(latest['Score (Balanced)']))
-                if 'Score (Aggressive)' in latest: cols[1].metric("Agg", int(latest['Score (Aggressive)']))
-                if 'Score (Defensive)' in latest: cols[2].metric("Def", int(latest['Score (Defensive)']))
-                if 'Score (Speculative)' in latest: cols[3].metric("Spec", int(latest['Score (Speculative)']))
-                st.caption(f"Price: ${latest.get('Price', 'N/A')} | Logged: {latest['Date']}")
-            with c_actions:
-                if st.button(f"🔄 Update", key=f"upd_{t}"):
-                    with st.spinner(f"Fetching {t}..."):
-                        hist, ov, cf, bs = get_alpha_data(t, key)
-                        pe_hist = get_historical_pe(t, key, hist)
-                        if not hist.empty and ov:
-                            _, _, raw_metrics, base_margin_scores = calculate_dynamic_score(ov, cf, bs, hist, {}, use_50ma=False, mode="Aggressive")
-                            s_bal = compute_weighted_score(base_margin_scores, WEIGHTS_BALANCED)
-                            s_agg = compute_weighted_score(base_margin_scores, WEIGHTS_AGGRESSIVE)
-                            s_def, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-                            s_spec, _, _, _ = calculate_dynamic_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-                            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-                            curr_price = hist['close'].iloc[-1]
-                            success = add_log_to_sheet(t, curr_price, raw_metrics, scores_db)
-                            if success:
-                                st.success(f"Updated {t}!")
-                                st.session_state.watchlist_df = get_watchlist_data()
-                                time.sleep(1)
-                                st.rerun()
-                        else: st.error("API Error.")
-                if st.button("🗑️ Delete", key=f"del_{t}"):
-                    remove_ticker_from_sheet(t)
-                    st.session_state.watchlist_df = get_watchlist_data()
-                    st.rerun()
-            st.divider()
-
-with t3:
-    st.header("Sector Flows")
-    c_sel, c_tf = st.columns([3, 1])
-    with c_sel:
-        all_sectors = [k for k in SECTOR_ETFS.keys() if "SPY" not in k]
-        selected_sectors = st.multiselect("Select Sectors", all_sectors, default=all_sectors)
-    with c_tf: days = tf_selector("rot")
-    if st.button("Analyze All Sectors", type="primary"):
-        if not selected_sectors:
-            st.error("Select sectors.")
-        else:
-            if not is_premium:
-                st.info(f"⏳ Free Mode: Scanning {len(selected_sectors)} sectors (~{len(selected_sectors) * 12}s). Check 'Premium' in sidebar to speed up.")
-            
-            spy_hist, _, _, _ = get_alpha_data("SPY", key)
-            if spy_hist.empty: st.stop()
-            cutoff = spy_hist.index[-1] - timedelta(days=days)
-            spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
-            df_rel = pd.DataFrame()
-            metrics_list = []
-            prog_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for i, sec_name in enumerate(selected_sectors):
-                ticker = SECTOR_ETFS[sec_name]
-                status_text.text(f"Fetching {ticker}...")
-                
-                if i > 0 and not is_premium: time.sleep(12) 
-                
-                hist, _, _, _ = get_alpha_data(ticker, key)
-                if not hist.empty:
-                    sec_sub = hist[hist.index >= cutoff]['close']
-                    combined = pd.concat([sec_sub, spy_sub], axis=1).dropna()
-                    combined.columns = ['Sector', 'SPY']
-                    rel_series = (combined['Sector'] / combined['SPY'])
-                    rel_perf = (rel_series / rel_series.iloc[0] - 1) * 100
-                    df_rel[sec_name] = rel_perf
-                    
-                    ma_200 = hist['close'].rolling(200).mean().iloc[-1]
-                    curr_price = hist['close'].iloc[-1]
-                    dist_200 = ((curr_price/ma_200)-1)*100 if pd.notna(ma_200) else 0
-                    
-                    if len(rel_series) > 126:
-                        rel_6m_ago = rel_series.iloc[-126]
-                        rel_now = rel_series.iloc[-1]
-                        rel_6m_change = ((rel_now / rel_6m_ago) - 1) * 100
-                        recent_trend = rel_series.iloc[-20:]
-                        slope_proxy = (recent_trend.iloc[-1] - recent_trend.iloc[0]) / recent_trend.iloc[0] * 100
-                    else:
-                        rel_6m_change = 0
-                        slope_proxy = 0
-                    
-                    trend_score = 0
-                    if dist_200 > 0: trend_score += 40
-                    if rel_6m_change > 0: trend_score += 30
-                    if slope_proxy > 0: trend_score += 30
-                    status_icon = "🟢 Bullish" if trend_score >= 70 else "🟡 Neutral" if trend_score >= 40 else "🔴 Bearish"
-                    
-                    metrics_list.append({
-                        "Sector": sec_name,
-                        "Price": f"${curr_price:.2f}",
-                        "vs 200MA": f"{dist_200:+.1f}%",
-                        "6M Rel Perf": f"{rel_6m_change:+.1f}%",
-                        "1M Rel Slope": f"{slope_proxy:+.2f}%",
-                        "Score": f"{trend_score}/100",
-                        "Status": status_icon
-                    })
-                prog_bar.progress((i + 1) / len(selected_sectors))
-            status_text.text("Done!")
-            
-            if metrics_list:
-                df_metrics = pd.DataFrame(metrics_list).sort_values("Score", ascending=False).reset_index(drop=True)
-                st.subheader("🏆 Sector Leaderboard")
-                st.dataframe(df_metrics, use_container_width=True)
-                st.subheader("📈 Relative Strength vs SPY")
-                if not df_rel.empty:
-                    fig = px.line(df_rel, title="Sector Relative Performance")
-                    fig.add_hline(y=0, line_dash="dot", line_color="white")
-                    st.plotly_chart(fig, use_container_width=True)
