@@ -10,7 +10,7 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v19.5", layout="wide")
+st.set_page_config(page_title="Alpha Pro v19.6", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", 
@@ -26,7 +26,7 @@ SECTOR_ETFS = {
     "S&P 500 (SPY)": "SPY"
 }
 
-# --- STRATEGY WEIGHTS (UPDATED v19.5) ---
+# --- STRATEGY WEIGHTS (UPDATED v19.6) ---
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 
@@ -34,9 +34,9 @@ WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 
 # Value (25), Income/Prof (25), Beta/Growth (25), Solvency/ROE (15), Momentum (10)
 WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
 
-# AGGRESSIVE 2.0 (GARP Mode)
-# Growth (35), Mom (25), Prof (20 - Rule of 40), Value (20 - Hybrid)
-WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 25, 'profitability': 20, 'value': 20, 'roe': 0}
+# AGGRESSIVE 2.1 (Strict GARP)
+# Growth (35), Value (25), Prof (20 - Rule of 40), Momentum (20)
+WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 20, 'profitability': 20, 'value': 25, 'roe': 0}
 
 # ==========================================
 # 2. GOOGLE SHEETS DATABASE
@@ -153,7 +153,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V19.5 - AGGRESSIVE GARP)
+# 4. SCORING ENGINE (V19.6 - REFINED AGGRESSIVE)
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -362,7 +362,6 @@ def calculate_dynamic_score(overview, cash_flow, balance_sheet, price_df, weight
         rel_str = "N/A"
         
         if historical_pe_df is not None and not historical_pe_df.empty:
-            # Use same logic as Defensive for extracting Mean P/E
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
             if not recent_pe.empty:
@@ -515,7 +514,7 @@ def plot_dual_axis(price_df, pe_df, title, days):
 # ==========================================
 # 6. MAIN APP
 # ==========================================
-st.title("🦅 Alpha Pro v19.5 (GARP + Defensive)")
+st.title("🦅 Alpha Pro v19.6 (GARP + Defensive)")
 
 with st.sidebar:
     st.header("Settings")
