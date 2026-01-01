@@ -188,25 +188,6 @@ def get_historical_pe(ticker, api_key, price_df):
 # ==========================================
 # 4. SCORING ENGINE (V20.0 - ULTIMATE)
 # ==========================================
-def get_sector_context(overview):
-    """Extract sector and return benchmarks"""
-    sector = overview.get('Sector', 'Default')
-    # Normalize sector names
-    sector_map = {
-        "TECHNOLOGY": "Technology",
-        "HEALTH CARE": "Healthcare", 
-        "FINANCIAL SERVICES": "Financials",
-        "ENERGY": "Energy",
-        "CONSUMER CYCLICAL": "Consumer Cyclical",
-        "CONSUMER DEFENSIVE": "Consumer Defensive",
-        "INDUSTRIALS": "Industrials",
-        "UTILITIES": "Utilities",
-        "REAL ESTATE": "Real Estate",
-        "COMMUNICATION SERVICES": "Communication Services",
-        "BASIC MATERIALS": "Materials"
-    }
-    normalized = sector_map.get(sector.upper(), "Default")
-    return normalized, SECTOR_BENCHMARKS.get(normalized, SECTOR_BENCHMARKS["Default"])
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
     if high_is_good:
