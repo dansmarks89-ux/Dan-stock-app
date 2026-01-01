@@ -10,24 +10,16 @@ import time
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v21.0", layout="wide")
+st.set_page_config(page_title="Alpha Pro v21.1", layout="wide")
 
-# ETF Map for Sector Analysis
 SECTOR_ETFS = {
-    "Technology (XLK)": "XLK", 
-    "Healthcare (XLV)": "XLV", 
-    "Financials (XLF)": "XLF",
-    "Energy (XLE)": "XLE", 
-    "Communication (XLC)": "XLC", 
-    "Consumer Disc (XLY)": "XLY",
-    "Consumer Stap (XLP)": "XLP", 
-    "Industrials (XLI)": "XLI", 
-    "Utilities (XLU)": "XLU",
-    "Real Estate (XLRE)": "XLRE",
-    "S&P 500 (SPY)": "SPY"
+    "Technology (XLK)": "XLK", "Healthcare (XLV)": "XLV", "Financials (XLF)": "XLF",
+    "Energy (XLE)": "XLE", "Communication (XLC)": "XLC", "Consumer Disc (XLY)": "XLY",
+    "Consumer Stap (XLP)": "XLP", "Industrials (XLI)": "XLI", "Utilities (XLU)": "XLU",
+    "Real Estate (XLRE)": "XLRE", "S&P 500 (SPY)": "SPY"
 }
 
-# --- DEFAULT WEIGHTS ---
+# Weights
 WEIGHTS_BALANCED = {'growth': 20, 'momentum': 20, 'profitability': 20, 'roe': 20, 'value': 20}
 WEIGHTS_SPECULATIVE = {'growth': 40, 'momentum': 60, 'profitability': 0, 'roe': 0, 'value': 0}
 WEIGHTS_DEFENSIVE = {'value': 25, 'roe': 15, 'profitability': 25, 'momentum': 10, 'growth': 25}
@@ -36,28 +28,13 @@ WEIGHTS_AGGRESSIVE = {'growth': 35, 'momentum': 20, 'profitability': 20, 'value'
 SECTOR_BENCHMARKS = {
     "Technology": {"margin_median": 20, "growth_median": 15, "pe_median": 25, "fcf_yield_median": 3.5, "roe_median": 18},
     "Healthcare": {"margin_median": 15, "growth_median": 8, "pe_median": 22, "fcf_yield_median": 4.0, "roe_median": 15},
-    "Financials": {"margin_median": 25, "growth_median": 6, "pe_median": 12, "fcf_yield_median": 5.0, "roe_median": 12},
-    "Energy": {"margin_median": 8, "growth_median": 5, "pe_median": 10, "fcf_yield_median": 6.0, "roe_median": 10},
-    "Consumer Cyclical": {"margin_median": 8, "growth_median": 10, "pe_median": 18, "fcf_yield_median": 4.0, "roe_median": 14},
-    "Consumer Defensive": {"margin_median": 6, "growth_median": 4, "pe_median": 20, "fcf_yield_median": 4.5, "roe_median": 18},
-    "Industrials": {"margin_median": 10, "growth_median": 7, "pe_median": 18, "fcf_yield_median": 4.0, "roe_median": 13},
-    "Utilities": {"margin_median": 12, "growth_median": 2, "pe_median": 16, "fcf_yield_median": 5.5, "roe_median": 9},
-    "Real Estate": {"margin_median": 25, "growth_median": 3, "pe_median": 30, "fcf_yield_median": 4.0, "roe_median": 8},
-    "Communication Services": {"margin_median": 18, "growth_median": 8, "pe_median": 20, "fcf_yield_median": 4.0, "roe_median": 15},
-    "Materials": {"margin_median": 10, "growth_median": 5, "pe_median": 15, "fcf_yield_median": 5.0, "roe_median": 12},
     "Default": {"margin_median": 12, "growth_median": 8, "pe_median": 18, "fcf_yield_median": 4.0, "roe_median": 14}
 }
 
 def get_sector_context(overview):
     sector = overview.get('Sector', 'Default')
-    sector_map = {
-        "TECHNOLOGY": "Technology", "HEALTH CARE": "Healthcare", "FINANCIAL SERVICES": "Financials",
-        "ENERGY": "Energy", "CONSUMER CYCLICAL": "Consumer Cyclical", "CONSUMER DEFENSIVE": "Consumer Defensive",
-        "INDUSTRIALS": "Industrials", "UTILITIES": "Utilities", "REAL ESTATE": "Real Estate",
-        "COMMUNICATION SERVICES": "Communication Services", "BASIC MATERIALS": "Materials"
-    }
-    normalized = sector_map.get(sector.upper(), "Default")
-    return normalized, SECTOR_BENCHMARKS.get(normalized, SECTOR_BENCHMARKS["Default"])
+    # Simplified map for brevity
+    return sector, SECTOR_BENCHMARKS.get(sector, SECTOR_BENCHMARKS["Default"])
 
 # ==========================================
 # 2. GOOGLE SHEETS DATABASE
@@ -67,12 +44,10 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def get_watchlist_data():
     try:
         df = conn.read(worksheet="Sheet1", ttl=0)
-        if df.empty or 'Ticker' not in df.columns:
-            return pd.DataFrame()
+        if df.empty or 'Ticker' not in df.columns: return pd.DataFrame()
         df = df.dropna(subset=['Ticker'])
         return df
-    except Exception:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
     try:
@@ -80,31 +55,23 @@ def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
         log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
 
         new_data = {
-            "Ticker": ticker,
-            "Date": log_date,
-            "Price": curr_price,
-            "Rev Growth": raw_metrics.get('Rev Growth'),
-            "Profit Margin": raw_metrics.get('Profit Margin'),
-            "FCF Yield": raw_metrics.get('FCF Yield'),
-            "ROE": raw_metrics.get('ROE'),
-            "PEG": raw_metrics.get('PEG'),
-            "Mom Position %": raw_metrics.get('Mom Position'),
-            "Mom Slope %": raw_metrics.get('Mom Slope'),
-            "RVOL": raw_metrics.get('RVOL'),
-            "RSI": raw_metrics.get('RSI'),
-            "Insider %": raw_metrics.get('Insider %'),
-            "Score (Balanced)": scores_dict.get('Balanced'),
-            "Score (Aggressive)": scores_dict.get('Aggressive'),
-            "Score (Defensive)": scores_dict.get('Defensive'),
-            "Score (Speculative)": scores_dict.get('Speculative')
+            "Ticker": ticker, "Date": log_date, "Price": curr_price,
+            "Rev Growth": raw_metrics.get('Rev Growth'), "Profit Margin": raw_metrics.get('Profit Margin'),
+            "FCF Yield": raw_metrics.get('FCF Yield'), "ROE": raw_metrics.get('ROE'),
+            "PEG": raw_metrics.get('PEG'), "Mom Position %": raw_metrics.get('Mom Position'),
+            "Mom Slope %": raw_metrics.get('Mom Slope'), "RVOL": raw_metrics.get('RVOL'),
+            "RSI": raw_metrics.get('RSI'), "Insider %": raw_metrics.get('Insider %'),
+            "Score (Balanced)": scores_dict.get('Balanced'), "Score (Aggressive)": scores_dict.get('Aggressive'),
+            "Score (Defensive)": scores_dict.get('Defensive'), "Score (Speculative)": scores_dict.get('Speculative')
         }
         
         new_row = pd.DataFrame([new_data])
         
         if not existing_df.empty:
+            # Only remove entries for the SAME ticker on the SAME date. 
+            # This preserves historical rows for your Excel analysis.
             mask = (existing_df['Ticker'] == ticker) & (existing_df['Date'] == log_date)
-            if not existing_df[mask].empty:
-                existing_df = existing_df[~mask]
+            existing_df = existing_df[~mask]
         
         updated_df = pd.concat([existing_df, new_row], ignore_index=True)
         conn.update(worksheet="Sheet1", data=updated_df)
@@ -120,8 +87,7 @@ def remove_ticker_from_sheet(ticker):
             df = df[df['Ticker'] != ticker]
             conn.update(worksheet="Sheet1", data=df)
             st.cache_data.clear()
-    except Exception as e: 
-        st.error(f"Remove failed: {e}")
+    except: st.error("Remove failed")
 
 # ==========================================
 # 3. DATA ENGINE
@@ -178,7 +144,7 @@ def get_historical_pe(ticker, api_key, price_df):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. SCORING ENGINE (V21.0 - ENHANCED)
+# 4. SCORING ENGINE
 # ==========================================
 def get_points(val, best, worst, max_pts, high_is_good=False):
     if val is None: return 0
@@ -192,7 +158,6 @@ def get_points(val, best, worst, max_pts, high_is_good=False):
         return round(((worst - val)/(worst - best)) * max_pts, 1)
 
 def calculate_rsi(prices, period=14):
-    """RSI: 0-30 = oversold, 70-100 = overbought"""
     try:
         deltas = prices.diff()
         gain = (deltas.where(deltas > 0, 0)).rolling(window=period).mean()
@@ -203,7 +168,6 @@ def calculate_rsi(prices, period=14):
     except: return 50.0
 
 def get_earnings_quality(cash_flow_data, income_statement):
-    """Higher quality = earnings backed by cash flow"""
     try:
         reports = cash_flow_data.get('annualReports', [])
         if reports:
@@ -212,11 +176,10 @@ def get_earnings_quality(cash_flow_data, income_statement):
             net_income = safe_float(latest.get('netIncome'))
             if ocf and net_income and net_income > 0:
                 cash_conversion = (ocf / net_income) * 100
-                if cash_conversion >= 100: quality_score = 20
-                elif cash_conversion >= 80: quality_score = 15
-                elif cash_conversion >= 60: quality_score = 10
-                else: quality_score = 5
-                return quality_score, cash_conversion
+                if cash_conversion >= 100: return 20, cash_conversion
+                elif cash_conversion >= 80: return 15, cash_conversion
+                elif cash_conversion >= 60: return 10, cash_conversion
+                else: return 5, cash_conversion
     except: pass
     return 10, None
 
@@ -224,12 +187,25 @@ def get_insider_ownership(overview):
     insider_pct = safe_float(overview.get('PercentInsiders'))
     if insider_pct:
         insider_pct = insider_pct * 100 if insider_pct < 1 else insider_pct
-        if 5 <= insider_pct <= 30: score = 20
-        elif 2 <= insider_pct < 5: score = 15
-        elif insider_pct > 30: score = 10 
-        else: score = 5
-        return score, insider_pct
+        if 5 <= insider_pct <= 30: return 20, insider_pct
+        elif 2 <= insider_pct < 5: return 15, insider_pct
+        elif insider_pct > 30: return 10, insider_pct
+        else: return 5, insider_pct
     return 10, None
+
+def get_advanced_income_metrics(cash_flow_data, mcap_int):
+    metrics = {"payout_ratio": None, "shareholder_yield": None}
+    try:
+        reports = cash_flow_data.get('annualReports', [])
+        if len(reports) >= 1:
+            latest = reports[0]
+            divs_paid = safe_float(latest.get('dividendPayout')) or 0
+            buybacks = abs(safe_float(latest.get('paymentsForRepurchaseOfCommonStock')) or 0)
+            if mcap_int and mcap_int > 0: metrics["shareholder_yield"] = ((divs_paid + buybacks) / mcap_int) * 100
+            net_income = safe_float(latest.get('netIncome'))
+            if net_income and net_income > 0: metrics["payout_ratio"] = (divs_paid / net_income) * 100
+    except: pass
+    return metrics
 
 def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df, weights, use_50ma=False, mode="Balanced", historical_pe_df=None):
     earned, possible = 0, 0
@@ -254,7 +230,6 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
             possible += w
             return f"N/A (0.0/{w})"
             
-    # --- HELPER: GET FCF ---
     def get_fcf_ttm(cash_flow_data):
         try:
             reports = cash_flow_data.get('annualReports', [])
@@ -267,8 +242,7 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
         try:
             q_reports = cash_flow_data.get('quarterlyReports', [])
             if len(q_reports) >= 4:
-                ttm_ocf = 0
-                ttm_capex = 0
+                ttm_ocf = 0; ttm_capex = 0
                 for i in range(4):
                     ttm_ocf += safe_float(q_reports[i].get('operatingCashflow')) or 0
                     ttm_capex += safe_float(q_reports[i].get('capitalExpenditures')) or 0
@@ -330,28 +304,44 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
         base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
         raw_metrics['Profit Margin'] = fcf_margin 
         log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f}", 'profitability', base_rule_pts)
+    elif mode == "Defensive":
+        adv_metrics = get_advanced_income_metrics(cash_flow, mcap)
+        div_yield = safe_float(overview.get('DividendYield'))
+        div_yield = div_yield * 100 if div_yield else 0
+        shareholder_yield = adv_metrics.get("shareholder_yield")
+        sy_score = get_points(shareholder_yield, 5.0, 0.0, 20, True) if shareholder_yield else 0
+        payout = adv_metrics.get("payout_ratio")
+        safety_penalty = 1.0
+        if payout and payout > 90:
+            safety_penalty = 0.5
+            log["Safety Warning"] = f"Payout Ratio {payout:.0f}% (>90%)"
+        fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True) if fcf_yield is not None else 0
+        div_score = get_points(div_yield, 3.5, 0.5, 20, True)
+        best_income_score = max(fcf_score, div_score, sy_score) * safety_penalty
+        
+        fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
+        if shareholder_yield and shareholder_yield > div_yield + 1: msg = f"Yld: {div_yield:.1f}% | Tot: {shareholder_yield:.1f}%"
+        else: msg = f"Yld: {div_yield:.1f}% / FCF: {fcf_str}"
+        log["Income (Smart)"] = process_metric("Total Yield", msg, 'profitability', best_income_score)
     else:
         base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
         log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
 
-    # --- 3. QUALITY / ROE (ENHANCED) ---
+    # --- 3. QUALITY / ROE ---
     roe = safe_float(overview.get('ReturnOnEquityTTM'))
     if roe and roe < 5: roe = roe * 100 
     raw_metrics['ROE'] = roe
-    
-    # New: Earnings Quality & Insider (Weighted 50% with Main Quality Metric)
     eq_score, cash_conv = get_earnings_quality(cash_flow, overview)
     insider_score, insider_pct = get_insider_ownership(overview)
     raw_metrics['Insider %'] = insider_pct
-    
     extra_quality = (eq_score + insider_score) / 2
     
     if mode == "Balanced":
         roa = safe_float(overview.get('ReturnOnAssetsTTM'))
         roa = roa * 100 if roa else 0
         roa_score = get_points(roa, 10.0, 2.0, 20, True)
-        final_quality = (roa_score * 0.7) + (extra_quality * 0.3) # 70% ROA, 30% Bonus
-        log["Quality (ROA+Ins)"] = process_metric("Quality", f"ROA {roa:.1f}% | Cash Conv {cash_conv:.0f}%", 'roe', final_quality)
+        final_quality = (roa_score * 0.7) + (extra_quality * 0.3)
+        log["Quality (ROA+Ins)"] = process_metric("Quality", f"ROA {roa:.1f}% | Cash Conv {cash_conv if cash_conv else 0:.0f}%", 'roe', final_quality)
     elif mode == "Defensive":
         de_ratio = None
         base_solvency = 0
@@ -371,57 +361,34 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
         log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', get_points(roe, 25, 5, 20, True) if roe else 0)
 
     # --- 4. VALUE ---
-    val_label = "PEG"
-    val_raw = None
-    base_val_pts = 0
-
+    val_label = "PEG"; val_raw = None; base_val_pts = 0
     if mode == "Defensive":
         val_label = "Hybrid Val"
-        rel_score = 0
-        current_pe = safe_float(overview.get('PERatio'))
-        avg_pe = None
+        rel_score = 0; current_pe = safe_float(overview.get('PERatio')); avg_pe = None
         if historical_pe_df is not None and not historical_pe_df.empty:
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
-            if not recent_pe.empty:
-                q_low = recent_pe.quantile(0.10)
-                q_high = recent_pe.quantile(0.90)
-                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
-                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
-                else: avg_pe = recent_pe.mean()
-                avg_pe = max(avg_pe, 15.0) 
+            if not recent_pe.empty: avg_pe = recent_pe.mean(); avg_pe = max(avg_pe, 15.0) 
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-        abs_score = 0
-        ev_ebitda = safe_float(overview.get('EVToEBITDA'))
-        if ev_ebitda:
-            abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
-            val_raw = ev_ebitda 
+        abs_score = 0; ev_ebitda = safe_float(overview.get('EVToEBITDA'))
+        if ev_ebitda: abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False); val_raw = ev_ebitda 
         if current_pe and ev_ebitda: base_val_pts = (rel_score + abs_score) / 2
         elif ev_ebitda: base_val_pts = abs_score
         raw_metrics['PEG'] = val_raw
         log["Valuation"] = process_metric(val_label, f"{ev_ebitda:.1f}x EBITDA", 'value', base_val_pts)
         
     elif mode == "Aggressive":
-        val_label = "Hybrid Growth"
-        rel_pe_score = 0
-        current_pe = safe_float(overview.get('PERatio'))
-        avg_pe = None
+        val_label = "Hybrid Growth"; rel_pe_score = 0; current_pe = safe_float(overview.get('PERatio')); avg_pe = None
         if historical_pe_df is not None and not historical_pe_df.empty:
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
-            if not recent_pe.empty:
-                q_low = recent_pe.quantile(0.10)
-                q_high = recent_pe.quantile(0.90)
-                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
-                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
-                else: avg_pe = recent_pe.mean()
+            if not recent_pe.empty: avg_pe = recent_pe.mean()
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_pe_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-        ev_sales = safe_float(overview.get('EVToRevenue'))
-        ev_score = 0
+        ev_sales = safe_float(overview.get('EVToRevenue')); ev_score = 0
         if ev_sales: ev_score = get_points(ev_sales, 5.0, 15.0, 20, False)
         if current_pe and avg_pe and ev_sales: base_val_pts = (rel_pe_score * 0.33) + (ev_score * 0.67)
         elif ev_sales: base_val_pts = ev_score
@@ -429,46 +396,29 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
         log["Valuation"] = process_metric(val_label, f"{ev_sales:.1f}x Sales" if ev_sales else "N/A", 'value', base_val_pts)
     
     elif mode == "Balanced":
-        val_label = "Hybrid PEG"
-        peg = safe_float(overview.get('PEGRatio'))
-        peg_score = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
-        rel_score = 0
-        current_pe = safe_float(overview.get('PERatio'))
-        avg_pe = None
-        pe_discount = None 
+        val_label = "Hybrid PEG"; peg = safe_float(overview.get('PEGRatio')); peg_score = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
+        rel_score = 0; current_pe = safe_float(overview.get('PERatio')); avg_pe = None; pe_discount = None 
         if historical_pe_df is not None and not historical_pe_df.empty:
             cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
             recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
-            if not recent_pe.empty:
-                q_low = recent_pe.quantile(0.10)
-                q_high = recent_pe.quantile(0.90)
-                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
-                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
-                else: avg_pe = recent_pe.mean()
+            if not recent_pe.empty: avg_pe = recent_pe.mean()
         if current_pe and avg_pe:
             pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
             rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
-        
         avg_val_pts = (peg_score + rel_score) / 2
         peg_str = f"{peg:.2f}" if peg else "N/A"
         val_str = f"PEG: {peg_str} | Disc: {pe_discount:+.0f}%" if (peg and current_pe and avg_pe and pe_discount is not None) else f"PEG: {peg_str}"
         raw_metrics['PEG'] = peg
         log["Valuation (PEG+Rel)"] = process_metric(val_label, val_str, 'value', avg_val_pts)
-
     else:
-        val_label = "PEG"
-        val_raw = safe_float(overview.get('PEGRatio'))
+        val_label = "PEG"; val_raw = safe_float(overview.get('PEGRatio'))
         base_val_pts = get_points(val_raw, 1.0, 2.5, 20, False) if val_raw else 0
         raw_metrics['PEG'] = val_raw 
         log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
 
-    # --- 5. MOMENTUM (ENHANCED with RSI) ---
-    pct_diff, slope_pct, rvol = None, None, None
-    rsi_val = 50
-    base_pts = 0
-    ma_window = 50 if use_50ma else 200
-    slope_lookback = 22 if use_50ma else 63
-    required_history = ma_window + slope_lookback + 5
+    # --- 5. MOMENTUM ---
+    pct_diff, slope_pct, rvol = None, None, None; rsi_val = 50; base_pts = 0
+    ma_window = 50 if use_50ma else 200; slope_lookback = 22 if use_50ma else 63; required_history = ma_window + slope_lookback + 5
     val_str = "N/A"
     
     if not price_df.empty and len(price_df) > required_history:
@@ -488,38 +438,27 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
             target_slope = 10 if use_50ma else 5
             slope_score = min(10, (slope_pct / target_slope) * 10) if slope_pct > 0 else 0
         
-        try:
-            vol_5 = price_df['volume'].iloc[-5:].mean()
-            vol_20 = price_df['volume'].iloc[-20:].mean()
-            rvol = vol_5 / vol_20 if vol_20 > 0 else 1.0
+        try: rvol = (price_df['volume'].iloc[-5:].mean()) / (price_df['volume'].iloc[-20:].mean())
         except: rvol = 1.0
         
-        # New RSI Score (Bonus)
         rsi_val = calculate_rsi(price_df['close'])
         rsi_score = 0
-        if 40 <= rsi_val <= 60: rsi_score = 0 # Neutral
-        elif 30 <= rsi_val < 40: rsi_score = 2 # Bullish oversold
-        elif rsi_val < 30: rsi_score = 3 # Extreme oversold
-        elif rsi_val > 70: rsi_score = -2 # Overbought
+        if 40 <= rsi_val <= 60: rsi_score = 0
+        elif 30 <= rsi_val < 40: rsi_score = 2
+        elif rsi_val < 30: rsi_score = 3
+        elif rsi_val > 70: rsi_score = -2
 
         base_pts = pos_score + slope_score + rsi_score
-        
-        # Volatility adjustments
         if rvol > 1.2 and slope_pct > 0: base_pts = min(20, base_pts + 2) 
         elif rvol < 0.6 and slope_pct > 0: base_pts = max(0, base_pts - 2)
-
         val_str = f"Pos: {pct_diff:+.1f}% | RSI: {rsi_val:.0f}"
     else: val_str = None
     
-    raw_metrics['Mom Position'] = pct_diff
-    raw_metrics['Mom Slope'] = slope_pct
-    raw_metrics['RVOL'] = rvol
-    raw_metrics['RSI'] = rsi_val
-    
+    raw_metrics['Mom Position'] = pct_diff; raw_metrics['Mom Slope'] = slope_pct
+    raw_metrics['RVOL'] = rvol; raw_metrics['RSI'] = rsi_val
     ma_label = "50-Day" if use_50ma else "200-Day"
     log[f"Trend ({ma_label})"] = process_metric("Momentum", val_str, 'momentum', base_pts)
 
-    # 6. DEFENSIVE PENALTY
     if mode == "Defensive":
         mcap = safe_float(overview.get('MarketCapitalization'))
         if mcap and mcap < 2e9:
@@ -531,30 +470,23 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
     score = int((earned/possible)*100) if possible > 0 else 0
     return score, log, raw_metrics, base_scores
 
-# ==========================================
-# 5. UI HELPERS & PLOTTING
-# ==========================================
-def tf_selector(key_suffix):
-    c_tf = st.columns(4)
-    tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
-    choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
-    return tf_map[choice]
-
-def plot_dual_axis(price_df, pe_df, title, days):
-    cutoff = price_df.index[-1] - timedelta(days=days)
-    p_sub = price_df[price_df.index >= cutoff]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=p_sub.index, y=p_sub['close'], name="Price ($)", line=dict(color='#00CC96', width=2)))
-    if not pe_df.empty:
-        pe_sub = pe_df[pe_df.index >= cutoff]
-        if not pe_sub.empty:
-            fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
-    fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig, use_container_width=True)
+# --- GLOBAL HELPER: PROCESS TICKER & LOG ---
+def process_and_log_ticker(ticker, api_key):
+    hist, ov, cf, bs = get_alpha_data(ticker, api_key)
+    pe_hist = get_historical_pe(ticker, api_key, hist)
+    if not hist.empty and ov:
+        s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+        s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+        s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+        s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+        scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
+        
+        success = add_log_to_sheet(ticker, hist['close'].iloc[-1], raw_metrics, scores_db)
+        return True
+    return False
 
 def plot_score_breakdown(base_scores, mode_name):
-    categories = list(base_scores.keys())
-    values = [base_scores[k] for k in categories]
+    categories = list(base_scores.keys()); values = [base_scores[k] for k in categories]
     values_pct = [(v/20)*100 for v in values]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=values_pct, theta=[k.title() for k in categories], fill='toself', name=mode_name))
@@ -562,9 +494,7 @@ def plot_score_breakdown(base_scores, mode_name):
     return fig
 
 def generate_signal(row):
-    score = row.get('Score (Balanced)', 0)
-    mom_slope = row.get('Mom Slope %', 0)
-    peg = row.get('PEG')
+    score = row.get('Score (Balanced)', 0); mom_slope = row.get('Mom Slope %', 0); peg = row.get('PEG')
     if score >= 75 and mom_slope > 5: return "🟢 Strong Buy"
     elif score >= 70 and (mom_slope > 0 or (peg and peg < 1.5)): return "🟢 Buy"
     elif score < 40: return "🔴 Sell"
@@ -574,41 +504,21 @@ def generate_signal(row):
 # ==========================================
 # 6. MAIN APP UI
 # ==========================================
-st.title("🦅 Alpha Pro v21.0 (Terminal)")
+st.title("🦅 Alpha Pro v21.1 (Data Warehouse)")
 
 with st.sidebar:
     st.header("Settings")
     if "AV_KEY" in st.secrets: key = st.secrets["AV_KEY"]
-    else: 
-        key = ""
-        st.warning("⚠️ AV_KEY missing")
-    
+    else: key = ""; st.warning("⚠️ AV_KEY missing")
     is_premium = st.checkbox("🔑 I have a Premium API Key")
     
     st.subheader("🧠 Strategy Mode")
-    strategy = st.radio("Market Phase", ["Balanced", "Aggressive Growth", "Defensive / Cyclical", "Speculative / Hype"])
-    
-    # Custom Weights Feature
-    with st.expander("⚙️ Advanced: Custom Weights"):
-        custom_growth = st.slider("Growth", 0, 50, 20)
-        custom_value = st.slider("Value", 0, 50, 20)
-        custom_mom = st.slider("Momentum", 0, 50, 20)
-        custom_prof = st.slider("Profitability", 0, 50, 20)
-        custom_qual = st.slider("Quality (ROE)", 0, 50, 20)
-        
-    is_speculative = False
-    mode_name = "Balanced"
-    
-    # Determine weights based on radio OR sliders
+    strategy = st.radio("Mode", ["Balanced", "Aggressive Growth", "Defensive", "Speculative"])
+    is_speculative = False; mode_name = "Balanced"
     if "Aggressive" in strategy: active_weights = WEIGHTS_AGGRESSIVE; mode_name = "Aggressive"
     elif "Defensive" in strategy: active_weights = WEIGHTS_DEFENSIVE; mode_name = "Defensive"
     elif "Speculative" in strategy: active_weights = WEIGHTS_SPECULATIVE; mode_name = "Speculative"; is_speculative = True
     else: active_weights = WEIGHTS_BALANCED; mode_name = "Balanced"
-    
-    # Override if custom
-    if st.checkbox("Use Custom Weights"):
-        active_weights = {'growth': custom_growth, 'value': custom_value, 'momentum': custom_mom, 'profitability': custom_prof, 'roe': custom_qual}
-        mode_name = "Custom"
 
     if 'watchlist_df' not in st.session_state:
         st.session_state.watchlist_df = get_watchlist_data()
@@ -617,190 +527,127 @@ with st.sidebar:
     
     # --- BATCH ADD ---
     with st.expander("➕ Batch Add Stocks"):
-        batch_input = st.text_area("Enter tickers (comma separated)", placeholder="AAPL, MSFT, GOOGL")
+        batch_input = st.text_area("Tickers (comma separated)")
         if st.button("Process Batch"):
             if not key: st.error("Need API Key")
             elif batch_input:
                 tickers = [t.strip().upper() for t in batch_input.split(",") if t.strip()]
-                progress_bar = st.progress(0)
-                status_txt = st.empty()
+                prog = st.progress(0); stat = st.empty()
                 for i, t in enumerate(tickers):
-                    status_txt.text(f"Analyzing {t} ({i+1}/{len(tickers)})...")
-                    hist, ov, cf, bs = get_alpha_data(t, key)
-                    pe_hist = get_historical_pe(t, key, hist)
-                    if not hist.empty and ov:
-                        s_bal, _, raw_metrics, base_scores = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
-                        s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-                        s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-                        s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-                        scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-                        add_log_to_sheet(t, hist['close'].iloc[-1], raw_metrics, scores_db)
-                    if not is_premium: time.sleep(12) # Rate limit
+                    stat.text(f"Processing {t} ({i+1}/{len(tickers)})...")
+                    process_and_log_ticker(t, key)
+                    if not is_premium: time.sleep(12)
                     else: time.sleep(1)
-                    progress_bar.progress((i + 1) / len(tickers))
-                st.success("Batch Complete!")
-                st.session_state.watchlist_df = get_watchlist_data()
-                st.rerun()
+                    prog.progress((i+1)/len(tickers))
+                st.success("Done!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
 
     if not st.session_state.watchlist_df.empty and 'Ticker' in st.session_state.watchlist_df.columns:
         unique_tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
     else: unique_tickers = []
     st.info(f"Tracking {len(unique_tickers)} Stocks")
-    
-    # --- ALERTS ---
-    st.sidebar.subheader("🔔 Alerts")
-    alerts = []
-    if not st.session_state.watchlist_df.empty:
-        for t in unique_tickers:
-            history = st.session_state.watchlist_df[st.session_state.watchlist_df['Ticker'] == t].sort_values("Date")
-            if len(history) >= 2:
-                latest = history.iloc[-1]; prior = history.iloc[-2]
-                if latest['Score (Balanced)'] < prior['Score (Balanced)'] - 10:
-                    alerts.append(f"⚠️ {t}: Score dropped {prior['Score (Balanced)'] - latest['Score (Balanced)']:.0f} pts")
-    if alerts:
-        for alert in alerts[:3]: st.sidebar.warning(alert)
-    else: st.sidebar.caption("No recent alerts")
 
 t1, t2, t3, t4 = st.tabs(["🔍 Analysis", "📈 Watchlist & Trends", "📊 Sector Flows", "🔎 Screener"])
 
 with t1:
     c1, c2 = st.columns([3, 1])
     tick = c1.text_input("Analyze Ticker", "AAPL").upper()
-    
     if tick and key:
         with st.spinner("Fetching Data..."):
             hist, ov, cf, bs = get_alpha_data(tick, key)
             pe_hist = get_historical_pe(tick, key, hist)
-            
         if not hist.empty and ov:
-            score, log, raw_metrics, base_scores = calculate_sector_relative_score(
-                ov, cf, bs, hist, active_weights, 
-                use_50ma=is_speculative, 
-                mode=mode_name,
-                historical_pe_df=pe_hist
-            )
-            
-            # DB Prep
-            s_bal, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
-            s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-            s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-            s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-            
+            score, log, raw_metrics, base_scores = calculate_sector_relative_score(ov, cf, bs, hist, active_weights, use_50ma=is_speculative, mode=mode_name, historical_pe_df=pe_hist)
             curr_price = hist['close'].iloc[-1]
-            day_delta = curr_price - hist['close'].iloc[-2] if len(hist)>1 else 0
             
             st.markdown(f"## {tick} - {ov.get('Name')}")
             k0, k1, k2, k3, k4 = st.columns(5)
-            k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
+            k0.metric("Price", f"${curr_price:.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
-            k2.metric("RSI (14)", f"{raw_metrics.get('RSI', 50):.0f}")
-            k3.metric("P/E (TTM)", f"{safe_float(ov.get('PERatio', 0)):.2f}")
+            k2.metric("RSI", f"{raw_metrics.get('RSI', 50):.0f}")
+            k3.metric("P/E", f"{safe_float(ov.get('PERatio', 0)):.2f}")
             k4.metric("Insider %", f"{raw_metrics.get('Insider %', 0):.1f}%")
             
             col_metrics, col_chart = st.columns([1, 2])
             with col_metrics:
-                # Color Coded Score
                 score_color = "🟢" if score >= 75 else "🟡" if score >= 50 else "🔴"
                 st.metric(f"Score ({mode_name})", f"{score_color} {score}/100")
-                
-                # Radar Chart
                 st.plotly_chart(plot_score_breakdown(base_scores, mode_name), use_container_width=True)
-                
-                df_log = pd.DataFrame(list(log.items()), columns=["Metric", "Details"])
-                st.dataframe(df_log, hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(list(log.items()), columns=["Metric", "Details"]), hide_index=True, use_container_width=True)
                 if st.button("⭐ Log to Cloud Watchlist"):
-                    add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
+                    process_and_log_ticker(tick, key)
                     st.success(f"Logged {tick}!")
                     st.session_state.watchlist_df = get_watchlist_data()
-            
             with col_chart:
-                days = tf_selector("ind")
-                plot_dual_axis(hist, pe_hist, f"{tick}: Price vs Valuation (P/E)", days)
-        else:
-            st.error("Data Unavailable.")
+                plot_dual_axis(hist, pe_hist, f"{tick}: Price vs Valuation (P/E)", tf_selector("ind"))
+        else: st.error("Data Unavailable.")
 
 with t2:
     st.header("Watchlist Portfolio")
-    df_wl = st.session_state.watchlist_df
     
+    # 1. UPDATE ALL BUTTON (NEW)
+    if st.button("🔄 Update All Stocks Now"):
+        if not key: st.error("Need API Key")
+        elif unique_tickers:
+            prog = st.progress(0); stat = st.empty()
+            for i, t in enumerate(unique_tickers):
+                stat.text(f"Updating {t} ({i+1}/{len(unique_tickers)})...")
+                process_and_log_ticker(t, key)
+                if not is_premium: time.sleep(12)
+                else: time.sleep(1)
+                prog.progress((i+1)/len(unique_tickers))
+            st.success("All Stocks Updated!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
+
+    # 2. CLEAN DISPLAY LOGIC
+    df_wl = st.session_state.watchlist_df
     if not df_wl.empty and 'Ticker' in df_wl.columns:
-        # Prepare Data
+        # Filter for ONLY the latest entry per ticker for display
         latest_entries = []
         for t in df_wl['Ticker'].unique():
             row = df_wl[df_wl['Ticker'] == t].sort_values("Date").iloc[-1]
             latest_entries.append(row)
         df_latest = pd.DataFrame(latest_entries)
         
-        # 1. TOP PICKS
-        st.markdown("### 🏆 Daily Leaders")
+        # Ensure columns exist
+        display_cols = ['Ticker', 'Price', 'Score (Balanced)', 'Signal', 'RSI', 'Mom Slope %']
+        for col in display_cols:
+            if col not in df_latest.columns: df_latest[col] = 0.0
+            
+        df_latest['Signal'] = df_latest.apply(generate_signal, axis=1)
+
+        # 3. TOP PICKS
+        st.markdown("### 🏆 Leaders")
         c1, c2, c3 = st.columns(3)
-        with c1:
-            top = df_latest.sort_values(by=['Score (Balanced)', 'Mom Slope %'], ascending=False).head(1)
-            if not top.empty: st.info(f"**Best Overall:** {top.iloc[0]['Ticker']} ({int(top.iloc[0]['Score (Balanced)'])}/100)")
-        with c2:
-            top = df_latest.sort_values(by=['Score (Aggressive)', 'Rev Growth'], ascending=False).head(1)
-            if not top.empty: st.error(f"**Best Growth:** {top.iloc[0]['Ticker']} ({int(top.iloc[0]['Score (Aggressive)'])}/100)")
-        with c3:
-            top = df_latest.sort_values(by=['Score (Defensive)', 'FCF Yield'], ascending=False).head(1)
-            if not top.empty: st.success(f"**Best Value:** {top.iloc[0]['Ticker']} ({int(top.iloc[0]['Score (Defensive)'])}/100)")
-        
+        top_bal = df_latest.sort_values(by=['Score (Balanced)', 'Mom Slope %'], ascending=False).head(1)
+        if not top_bal.empty: c1.info(f"**Best Overall:** {top_bal.iloc[0]['Ticker']} ({int(top_bal.iloc[0]['Score (Balanced)'])}/100)")
+        top_agg = df_latest.sort_values(by=['Score (Aggressive)', 'Rev Growth'], ascending=False).head(1)
+        if not top_agg.empty: c2.error(f"**Best Growth:** {top_agg.iloc[0]['Ticker']} ({int(top_agg.iloc[0]['Score (Aggressive)'])}/100)")
+        top_def = df_latest.sort_values(by=['Score (Defensive)', 'FCF Yield'], ascending=False).head(1)
+        if not top_def.empty: c3.success(f"**Best Value:** {top_def.iloc[0]['Ticker']} ({int(top_def.iloc[0]['Score (Defensive)'])}/100)")
         st.divider()
         
-        # 2. ALLOCATION & SIGNALS
-        col_list, col_pie = st.columns([2, 1])
+        # 4. MAIN TABLE
+        st.dataframe(df_latest[display_cols].style.applymap(lambda x: "background-color: #d4edda" if "Buy" in str(x) else ("background-color: #f8d7da" if "Sell" in str(x) else ""), subset=['Signal']), use_container_width=True)
         
-        with col_list:
-            st.subheader("Your Holdings")
-            # Generate Signals
-            df_latest['Signal'] = df_latest.apply(generate_signal, axis=1)
-            
-            # --- FIX STARTS HERE: SAFETY CHECK ---
-            # Define the columns we want to show
-            display_cols = ['Ticker', 'Price', 'Score (Balanced)', 'Signal', 'RSI', 'Mom Slope %']
-            
-            # Ensure all columns exist; if missing (old data), fill with 0 or None
-            for col in display_cols:
-                if col not in df_latest.columns:
-                    df_latest[col] = 0.0
-            # --- FIX ENDS HERE ---
-
-            # Display Table with signals
-            st.dataframe(df_latest[display_cols].style.applymap(lambda x: "background-color: #d4edda" if "Buy" in str(x) else ("background-color: #f8d7da" if "Sell" in str(x) else ""), subset=['Signal']), use_container_width=True)
-        
-        # 3. INDIVIDUAL TRENDS
-        tickers = st.multiselect("View History For:", df_latest['Ticker'].unique())
-        for t in tickers:
-            history = df_wl[df_wl['Ticker'] == t].sort_values("Date")
-            fig = px.line(history, x='Date', y='Score (Balanced)', title=f"{t} Score History", markers=True)
-            fig.add_hline(y=75, line_dash="dash", line_color="green")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            c_act, _ = st.columns([1, 4])
-            if c_act.button(f"Update {t}", key=f"upd_{t}"):
-                # Update logic (simplified for brevity)
-                hist, ov, cf, bs = get_alpha_data(t, key)
-                pe_hist = get_historical_pe(t, key, hist)
-                if ov:
-                    s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, mode="Balanced", historical_pe_df=pe_hist)
-                    # (Re-calculate other scores similarly...)
-                    # For update button to work perfectly, replicate the full calc block here or refactor into function
-                    st.info("Please use Batch Add or Main Analysis to update for now to save code space.") 
+        # 5. INDIVIDUAL TRENDS
+        st.divider()
+        t_sel = st.selectbox("Select Stock for History", unique_tickers)
+        if t_sel:
+            hist_data = df_wl[df_wl['Ticker'] == t_sel].sort_values("Date")
+            st.plotly_chart(px.line(hist_data, x='Date', y='Score (Balanced)', title=f"{t_sel} Historical Score"), use_container_width=True)
+            if st.button(f"Delete {t_sel}"):
+                remove_ticker_from_sheet(t_sel); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
 
 with t3:
     st.header("Sector Flows")
     c_sel, c_tf = st.columns([3, 1])
-    with c_sel:
-        selected_sectors = st.multiselect("Select Sectors", list(SECTOR_ETFS.keys())[:-1], default=list(SECTOR_ETFS.keys())[:-1])
+    with c_sel: selected_sectors = st.multiselect("Select Sectors", list(SECTOR_ETFS.keys())[:-1], default=list(SECTOR_ETFS.keys())[:-1])
     with c_tf: days = tf_selector("rot")
-    
     if st.button("Analyze Sectors"):
         spy_hist, _, _, _ = get_alpha_data("SPY", key)
         if not spy_hist.empty:
             cutoff = spy_hist.index[-1] - timedelta(days=days)
             spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
             df_rel = pd.DataFrame()
-            
             prog = st.progress(0)
             for i, sec in enumerate(selected_sectors):
                 ticker = SECTOR_ETFS[sec]
@@ -811,54 +658,29 @@ with t3:
                     rel = comb.iloc[:, 0] / comb.iloc[:, 1]
                     df_rel[sec] = (rel / rel.iloc[0] - 1) * 100
                 prog.progress((i+1)/len(selected_sectors))
-            
-            if not df_rel.empty:
-                st.plotly_chart(px.line(df_rel, title="Sector Relative Performance vs SPY"), use_container_width=True)
+            st.plotly_chart(px.line(df_rel, title="Sector Relative Performance vs SPY"), use_container_width=True)
 
 with t4:
     st.header("🔎 Stock Screener")
-    st.caption("Filter your existing watchlist to find opportunities.")
-    
-    if not df_wl.empty and 'Ticker' in df_wl.columns:
+    if not df_wl.empty:
         c1, c2, c3 = st.columns(3)
-        with c1:
-            min_score = st.slider("Min Balanced Score", 0, 100, 60)
-        with c2:
-            min_growth = st.slider("Min Revenue Growth %", -20, 50, 5)
-        with c3:
-            max_peg = st.slider("Max PEG Ratio", 0.0, 5.0, 2.0)
-            
-        # Filter Logic
+        with c1: min_score = st.slider("Min Balanced Score", 0, 100, 60)
+        with c2: min_growth = st.slider("Min Revenue Growth %", -20, 50, 5)
+        with c3: max_peg = st.slider("Max PEG Ratio", 0.0, 5.0, 2.0)
+        
         latest_entries = []
         for t in df_wl['Ticker'].unique():
             latest_entries.append(df_wl[df_wl['Ticker'] == t].sort_values("Date").iloc[-1])
         df_screen = pd.DataFrame(latest_entries)
         
-        # --- FIX STARTS HERE ---
-        # 1. Ensure missing columns exist (for old data)
         for col in ['RSI', 'Rev Growth', 'PEG', 'Mom Slope %', 'Signal']:
-            if col not in df_screen.columns:
-                df_screen[col] = 0.0 if col != 'Signal' else "N/A"
-
-        # 2. Calculate Signal on the fly (since it's not in the database)
-        # This prevents the KeyError for 'Signal'
+            if col not in df_screen.columns: df_screen[col] = 0.0 if col != 'Signal' else "N/A"
         df_screen['Signal'] = df_screen.apply(generate_signal, axis=1)
-        # --- FIX ENDS HERE ---
         
-        # Apply Masks
-        mask = (df_screen['Score (Balanced)'] >= min_score) & \
-               (df_screen['Rev Growth'] >= min_growth)
-        
-        # Handle PEG (some might be None/NaN)
+        mask = (df_screen['Score (Balanced)'] >= min_score) & (df_screen['Rev Growth'] >= min_growth)
         mask_peg = (df_screen['PEG'] <= max_peg) | (df_screen['PEG'].isna()) | (df_screen['PEG'] == 0.0)
-        
         filtered = df_screen[mask & mask_peg]
         
-        if not filtered.empty:
-            st.success(f"Matches: {len(filtered)}")
-            # Now it is safe to select these columns
-            st.dataframe(filtered[['Ticker', 'Score (Balanced)', 'Rev Growth', 'PEG', 'RSI', 'Signal']], use_container_width=True)
-        else:
-            st.info("No stocks match these filters.")
-    else:
-        st.info("Watchlist is empty.")
+        if not filtered.empty: st.dataframe(filtered[['Ticker', 'Score (Balanced)', 'Rev Growth', 'PEG', 'RSI', 'Signal']], use_container_width=True)
+        else: st.info("No matches.")
+    else: st.info("Watchlist empty.")
