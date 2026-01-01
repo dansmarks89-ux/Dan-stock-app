@@ -575,60 +575,11 @@ def generate_signal(row, score_col):
     elif mom_slope < -10 and (peg and peg > 2.5): return "🔴 Sell"
     else: return "🟡 Hold"
 
-# ==========================================
-# 5. UI HELPERS & PLOTTING
-# ==========================================
 def tf_selector(key_suffix):
-    c_tf = st.columns(4)
+    """Time frame selector for charts"""
     tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
     choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
     return tf_map[choice]
-
-def plot_dual_axis(price_df, pe_df, title, days):
-    cutoff = price_df.index[-1] - timedelta(days=days)
-    p_sub = price_df[price_df.index >= cutoff]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=p_sub.index, y=p_sub['close'], name="Price ($)", line=dict(color='#00CC96', width=2)))
-    if not pe_df.empty:
-        pe_sub = pe_df[pe_df.index >= cutoff]
-        if not pe_sub.empty:
-            fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
-    fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig, use_container_width=True)
-
-# --- GLOBAL HELPER: PROCESS TICKER & LOG ---
-def process_and_log_ticker(ticker, api_key):
-    hist, ov, cf, bs = get_alpha_data(ticker, api_key)
-    pe_hist = get_historical_pe(ticker, api_key, hist)
-    if not hist.empty and ov:
-        s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
-        s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-        s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-        s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-        scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-        
-        sector = ov.get('Sector', 'Unknown')
-        mcap = safe_float(ov.get('MarketCapitalization'))
-        
-        success = add_log_to_sheet(ticker, hist['close'].iloc[-1], raw_metrics, scores_db, sector, mcap)
-        return True
-    return False
-
-def plot_score_breakdown(base_scores, mode_name):
-    categories = list(base_scores.keys()); values = [base_scores[k] for k in categories]
-    values_pct = [(v/20)*100 for v in values]
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(r=values_pct, theta=[k.title() for k in categories], fill='toself', name=mode_name))
-    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False, height=300, title=f"{mode_name} DNA")
-    return fig
-
-def generate_signal(row, score_col):
-    score = row.get(score_col, 0); mom_slope = row.get('Mom Slope %', 0); peg = row.get('PEG')
-    if score >= 90 and mom_slope > 5: return "🟢 Strong Buy"
-    elif score >= 80 and (mom_slope > 0 or (peg and peg < 1.5)): return "🟢 Buy"
-    elif score < 40: return "🔴 Sell"
-    elif mom_slope < -10 and (peg and peg > 2.5): return "🔴 Sell"
-    else: return "🟡 Hold"
 
 # ==========================================
 # 6. MAIN APP UI
@@ -742,33 +693,53 @@ with t1:
 with t2:
     st.header("Watchlist")
     
-    # 1. UPDATE ALL BUTTON (OPTIMIZED BUFFER)
+    df_wl = st.session_state.watchlist_df
+    
+    # 1. UPDATE ALL BUTTON
     if st.button("🔄 Update All Stocks Now", type="primary"):
-    if not key: 
-        st.error("Need API Key")
-    elif not st.session_state.watchlist_df.empty:
-        tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
-        est_time = len(tickers) * (0.8 if is_premium else 12)
-        elif not st.session_state.watchlist_df.empty:
-            tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
-            prog = st.progress(0); stat = st.empty()
-            new_data_buffer = [] 
+        if not key:
+            st.error("⚠️ API Key required")
+        elif df_wl.empty:
+            st.info("Watchlist is empty")
+        else:
+            tickers = df_wl['Ticker'].unique().tolist()
+            est_time = len(tickers) * 0.8  # Premium speed
             
-            # Helper to round
+            st.info(f"⏱️ Updating {len(tickers)} stocks (est. {est_time/60:.1f} minutes)")
+            
+            prog = st.progress(0)
+            stat = st.empty()
+            new_data_buffer = []
+            
             def r2(val):
-                try: return round(float(val), 2)
-                except: return None
+                try: 
+                    return round(float(val), 2)
+                except: 
+                    return None
             
             for i, t in enumerate(tickers):
                 stat.text(f"Updating {t} ({i+1}/{len(tickers)})...")
                 
                 hist, ov, cf, bs = get_alpha_data(t, key)
                 pe_hist = get_historical_pe(t, key, hist)
+                
                 if not hist.empty and ov:
-                    s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
-                    s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-                    s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-                    s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+                    s_bal, _, raw_metrics, _ = calculate_sector_relative_score(
+                        ov, cf, bs, hist, WEIGHTS_BALANCED, 
+                        use_50ma=False, mode="Balanced", historical_pe_df=pe_hist
+                    )
+                    s_agg, _, _, _ = calculate_sector_relative_score(
+                        ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, 
+                        use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist
+                    )
+                    s_def, _, _, _ = calculate_sector_relative_score(
+                        ov, cf, bs, hist, WEIGHTS_DEFENSIVE, 
+                        use_50ma=False, mode="Defensive", historical_pe_df=pe_hist
+                    )
+                    s_spec, _, _, _ = calculate_sector_relative_score(
+                        ov, cf, bs, hist, WEIGHTS_SPECULATIVE, 
+                        use_50ma=True, mode="Speculative"
+                    )
                     
                     curr_price = hist['close'].iloc[-1]
                     log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
@@ -776,60 +747,80 @@ with t2:
                     mcap = safe_float(ov.get('MarketCapitalization'))
                     
                     row = {
-                        "Ticker": t, "Date": log_date, "Sector": sector, "Price": r2(curr_price), "Market Cap": r2(mcap),
-                        "Rev Growth": r2(raw_metrics.get('Rev Growth')), "Profit Margin": r2(raw_metrics.get('Profit Margin')),
-                        "FCF Yield": r2(raw_metrics.get('FCF Yield')), "ROE": r2(raw_metrics.get('ROE')),
-                        "PEG": r2(raw_metrics.get('PEG')), "Mom Position %": r2(raw_metrics.get('Mom Position')),
-                        "Mom Slope %": r2(raw_metrics.get('Mom Slope')), "RVOL": r2(raw_metrics.get('RVOL')),
-                        "RSI": r2(raw_metrics.get('RSI')), "Insider %": r2(raw_metrics.get('Insider %')),
+                        "Ticker": t, "Date": log_date, "Sector": sector, 
+                        "Price": r2(curr_price), "Market Cap": r2(mcap),
+                        "Rev Growth": r2(raw_metrics.get('Rev Growth')), 
+                        "Profit Margin": r2(raw_metrics.get('Profit Margin')),
+                        "FCF Yield": r2(raw_metrics.get('FCF Yield')), 
+                        "ROE": r2(raw_metrics.get('ROE')),
+                        "PEG": r2(raw_metrics.get('PEG')), 
+                        "Mom Position %": r2(raw_metrics.get('Mom Position')),
+                        "Mom Slope %": r2(raw_metrics.get('Mom Slope')), 
+                        "RVOL": r2(raw_metrics.get('RVOL')),
+                        "RSI": r2(raw_metrics.get('RSI')), 
+                        "Insider %": r2(raw_metrics.get('Insider %')),
                         "Score (Balanced)": s_bal, "Score (Aggressive)": s_agg,
                         "Score (Defensive)": s_def, "Score (Speculative)": s_spec
                     }
                     new_data_buffer.append(row)
                 
-                time.sleep(0.8) 
-                prog.progress((i+1)/len(tickers))
+                time.sleep(0.8)  # Premium speed
+                prog.progress((i + 1) / len(tickers))
             
             if new_data_buffer:
-                stat.text("Saving update to database...")
+                stat.text("Saving to database...")
                 batch_save_to_sheet(new_data_buffer)
-                st.success("All Stocks Updated!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
+                st.success(f"✅ Updated {len(new_data_buffer)} stocks!")
+                st.session_state.watchlist_df = get_watchlist_data()
+                st.rerun()
+            else:
+                st.error("No data retrieved")
 
-    # 2. DYNAMIC DISPLAY
-    df_wl = st.session_state.watchlist_df
+    # 2. DISPLAY LOGIC
     if not df_wl.empty and 'Ticker' in df_wl.columns:
         # User Selection
-        view_mode = st.radio("View Score Type", ["Balanced", "Aggressive", "Defensive", "Speculative"], horizontal=True)
+        view_mode = st.radio(
+            "View Score Type", 
+            ["Balanced", "Aggressive", "Defensive", "Speculative"], 
+            horizontal=True
+        )
         score_col = f"Score ({view_mode})"
         
-        # Filter for ONLY the latest entry per ticker for display
+        # Get latest entries
         latest_entries = []
         for t in df_wl['Ticker'].unique():
             row = df_wl[df_wl['Ticker'] == t].sort_values("Date").iloc[-1]
             latest_entries.append(row)
         df_latest = pd.DataFrame(latest_entries)
         
-        # Ensure Market Cap exists (fill 0 if missing from old data)
-        if 'Market Cap' not in df_latest.columns: df_latest['Market Cap'] = 0.0
+        # Ensure Market Cap exists
+        if 'Market Cap' not in df_latest.columns:
+            df_latest['Market Cap'] = 0.0
         
-        # SPECULATIVE GUARDRAIL: Filter out companies > $50B Market Cap
+        # SPECULATIVE FILTER
+        SPECULATIVE_MAX_MCAP = 50_000_000_000  # $50B
         if view_mode == "Speculative":
             original_len = len(df_latest)
-            df_latest = df_latest[df_latest['Market Cap'] < 50000000000] # 50 Billion
-            st.caption(f"Speculative Mode Active: Filtered {original_len - len(df_latest)} large-cap stocks (> $50B).")
+            df_latest = df_latest[df_latest['Market Cap'] < SPECULATIVE_MAX_MCAP]
+            filtered_count = original_len - len(df_latest)
+            if filtered_count > 0:
+                st.caption(f"🔍 Filtered {filtered_count} large-cap stocks (> $50B)")
 
-        # Generate Signal based on selected Score
-        df_latest['Signal'] = df_latest.apply(lambda row: generate_signal(row, score_col), axis=1)
+        # Generate Signals
+        df_latest['Signal'] = df_latest.apply(
+            lambda row: generate_signal(row, score_col), axis=1
+        )
         
-        # Rename Score Column for clean display
+        # Rename for display
         df_latest = df_latest.rename(columns={score_col: "Score"})
         
-        # Display Table (Minimalist)
+        # Display
         display_cols = ['Ticker', 'Signal', 'Score']
         
         st.dataframe(
             df_latest[display_cols].sort_values("Score", ascending=False).style.applymap(
-                lambda x: "background-color: #d4edda; color: black" if "Buy" in str(x) else ("background-color: #f8d7da; color: black" if "Sell" in str(x) else ""), 
+                lambda x: "background-color: #d4edda; color: black" if "Buy" in str(x) 
+                else ("background-color: #f8d7da; color: black" if "Sell" in str(x) else ""), 
                 subset=['Signal']
             ), 
             use_container_width=True, 
@@ -841,9 +832,22 @@ with t2:
         t_sel = st.selectbox("Select Stock for History", df_wl['Ticker'].unique())
         if t_sel:
             hist_data = df_wl[df_wl['Ticker'] == t_sel].sort_values("Date")
-            st.plotly_chart(px.line(hist_data, x='Date', y=score_col if score_col in hist_data.columns else 'Score (Balanced)', title=f"{t_sel} Historical Score"), use_container_width=True)
-            if st.button(f"Delete {t_sel}"):
-                remove_ticker_from_sheet(t_sel); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
+            display_score_col = score_col if score_col in hist_data.columns else 'Score (Balanced)'
+            
+            st.plotly_chart(
+                px.line(
+                    hist_data, x='Date', y=display_score_col, 
+                    title=f"{t_sel} Historical Score"
+                ), 
+                use_container_width=True
+            )
+            
+            if st.button(f"🗑️ Delete {t_sel}"):
+                remove_ticker_from_sheet(t_sel)
+                st.session_state.watchlist_df = get_watchlist_data()
+                st.rerun()
+    else:
+        st.info("📭 Watchlist is empty. Add stocks using the sidebar.")
 
 with t3:
     st.header("🌊 Sector Flow Intelligence")
@@ -1200,7 +1204,12 @@ with t3:
 
 with t4:
     st.header("🔎 Dynamic Screener")
-    if not df_wl.empty:
+    
+    df_wl = st.session_state.watchlist_df
+    
+    if df_wl.empty or 'Ticker' not in df_wl.columns:
+        st.info("📭 Watchlist is empty. Add stocks using the sidebar.")
+    elif not df_wl.empty:
         # 1. Select Score Type
         screen_mode = st.selectbox("Score Type", ["Balanced", "Aggressive", "Defensive", "Speculative"])
         target_score_col = f"Score ({screen_mode})"
