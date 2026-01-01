@@ -522,8 +522,8 @@ def plot_score_breakdown(base_scores, mode_name):
 
 def generate_signal(row):
     score = row.get('Score (Balanced)', 0); mom_slope = row.get('Mom Slope %', 0); peg = row.get('PEG')
-    if score >= 75 and mom_slope > 5: return "🟢 Strong Buy"
-    elif score >= 70 and (mom_slope > 0 or (peg and peg < 1.5)): return "🟢 Buy"
+    if score >= 90 and mom_slope > 5: return "🟢 Strong Buy"
+    elif score >= 80 and (mom_slope > 0 or (peg and peg < 1.5)): return "🟢 Buy"
     elif score < 40: return "🔴 Sell"
     elif mom_slope < -10 and (peg and peg > 2.5): return "🔴 Sell"
     else: return "🟡 Hold"
