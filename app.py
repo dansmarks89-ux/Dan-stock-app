@@ -440,7 +440,11 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
         if current_pe and ev_ebitda: base_val_pts = (rel_score + abs_score) / 2
         elif ev_ebitda: base_val_pts = abs_score
         raw_metrics['PEG'] = val_raw
-        log["Valuation"] = process_metric(val_label, f"{ev_ebitda:.1f}x EBITDA", 'value', base_val_pts)
+        # Fix: Handle None ev_ebitda
+        if ev_ebitda is not None:
+            log["Valuation"] = process_metric(val_label, f"{ev_ebitda:.1f}x EBITDA", 'value', base_val_pts)
+        else:
+            log["Valuation"] = process_metric(val_label, None, 'value', 0)
         
     elif mode == "Aggressive":
         val_label = "Hybrid Growth"; rel_pe_score = 0; current_pe = safe_float(overview.get('PERatio')); avg_pe = None
@@ -862,27 +866,11 @@ with t2:
         # Rename for display
         df_latest = df_latest.rename(columns={score_col: "Score"})
         
-        # Display with highlighting
+        # Display with highlighting (only buy/sell signals)
         display_cols = ['Ticker', 'Signal', 'Score']
         
-        def highlight_top_picks(row):
-            """Apply color highlighting to top picks"""
-            ticker = row['Ticker']
-            
-            # Category-specific colors
-            if ticker in balanced_tops:
-                return ['background-color: #90EE90; font-weight: bold'] * len(row)  # Light green
-            elif ticker in aggressive_tops:
-                return ['background-color: #87CEEB; font-weight: bold'] * len(row)  # Light blue
-            elif ticker in defensive_tops:
-                return ['background-color: #FFD700; font-weight: bold'] * len(row)  # Gold
-            else:
-                return [''] * len(row)
-        
         st.dataframe(
-            df_latest[display_cols].sort_values("Score", ascending=False).style.apply(
-                highlight_top_picks, axis=1
-            ).applymap(
+            df_latest[display_cols].sort_values("Score", ascending=False).style.applymap(
                 lambda x: "background-color: #d4edda; color: black" if "Buy" in str(x) 
                 else ("background-color: #f8d7da; color: black" if "Sell" in str(x) else ""), 
                 subset=['Signal']
