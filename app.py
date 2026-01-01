@@ -11,7 +11,7 @@ import numpy as np
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
 # ==========================================
-st.set_page_config(page_title="Alpha Pro v21.1", layout="wide")
+st.set_page_config(page_title="Alpha Pro v21.2", layout="wide")
 
 SECTOR_ETFS = {
     "Technology (XLK)": "XLK", "Healthcare (XLV)": "XLV", "Financials (XLF)": "XLF",
@@ -37,7 +37,7 @@ def get_sector_context(overview):
     return sector, SECTOR_BENCHMARKS.get(sector, SECTOR_BENCHMARKS["Default"])
 
 # ==========================================
-# 2. GOOGLE SHEETS DATABASE
+# 2. GOOGLE SHEETS DATABASE (BATCH OPTIMIZED)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -49,7 +49,30 @@ def get_watchlist_data():
         return df
     except: return pd.DataFrame()
 
+def batch_save_to_sheet(new_rows_list):
+    """
+    Saves a list of new rows to Google Sheets in ONE operation to avoid 429 Errors.
+    Appends ONLY (Data Warehouse Logic).
+    """
+    if not new_rows_list: return
+    try:
+        existing_df = get_watchlist_data()
+        new_batch_df = pd.DataFrame(new_rows_list)
+        
+        if not existing_df.empty:
+            updated_df = pd.concat([existing_df, new_batch_df], ignore_index=True)
+        else:
+            updated_df = new_batch_df
+            
+        conn.update(worksheet="Sheet1", data=updated_df)
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Batch Save Failed: {e}")
+        return False
+
 def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
+    """Single entry save (Append Only)"""
     try:
         existing_df = get_watchlist_data()
         log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
@@ -68,10 +91,10 @@ def add_log_to_sheet(ticker, curr_price, raw_metrics, scores_dict):
         new_row = pd.DataFrame([new_data])
         
         if not existing_df.empty:
-            mask = (existing_df['Ticker'] == ticker) & (existing_df['Date'] == log_date)
-            existing_df = existing_df[~mask]
-        
-        updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+            updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+        else:
+            updated_df = new_row
+            
         conn.update(worksheet="Sheet1", data=updated_df)
         return True
     except Exception as e:
@@ -469,7 +492,7 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
     return score, log, raw_metrics, base_scores
 
 # ==========================================
-# 5. UI HELPERS & PLOTTING
+# 5. UI HELPERS & PLOTTING (RESTORED)
 # ==========================================
 def tf_selector(key_suffix):
     c_tf = st.columns(4)
@@ -488,21 +511,6 @@ def plot_dual_axis(price_df, pe_df, title, days):
             fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
     fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig, use_container_width=True)
-
-# --- GLOBAL HELPER: PROCESS TICKER & LOG ---
-def process_and_log_ticker(ticker, api_key):
-    hist, ov, cf, bs = get_alpha_data(ticker, api_key)
-    pe_hist = get_historical_pe(ticker, api_key, hist)
-    if not hist.empty and ov:
-        s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
-        s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
-        s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
-        s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
-        scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
-        
-        success = add_log_to_sheet(ticker, hist['close'].iloc[-1], raw_metrics, scores_db)
-        return True
-    return False
 
 def plot_score_breakdown(base_scores, mode_name):
     categories = list(base_scores.keys()); values = [base_scores[k] for k in categories]
@@ -523,13 +531,13 @@ def generate_signal(row):
 # ==========================================
 # 6. MAIN APP UI
 # ==========================================
-st.title("🦅 Alpha Pro v21.1 (Data Warehouse)")
+st.title("🦅 Alpha Pro v21.2 (Data Warehouse)")
 
 with st.sidebar:
     st.header("Settings")
     if "AV_KEY" in st.secrets: key = st.secrets["AV_KEY"]
     else: key = ""; st.warning("⚠️ AV_KEY missing")
-    is_premium = st.checkbox("🔑 I have a Premium API Key")
+    # Removed "Is Premium" checkbox - assumed True
     
     st.subheader("🧠 Strategy Mode")
     strategy = st.radio("Mode", ["Balanced", "Aggressive Growth", "Defensive", "Speculative"])
@@ -544,7 +552,7 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # --- BATCH ADD ---
+    # --- BATCH ADD (WITH BUFFERING) ---
     with st.expander("➕ Batch Add Stocks"):
         batch_input = st.text_area("Tickers (comma separated)")
         if st.button("Process Batch"):
@@ -552,13 +560,42 @@ with st.sidebar:
             elif batch_input:
                 tickers = [t.strip().upper() for t in batch_input.split(",") if t.strip()]
                 prog = st.progress(0); stat = st.empty()
+                new_data_buffer = [] # COLLECT DATA HERE
+                
                 for i, t in enumerate(tickers):
                     stat.text(f"Processing {t} ({i+1}/{len(tickers)})...")
-                    process_and_log_ticker(t, key)
-                    if not is_premium: time.sleep(12)
-                    else: time.sleep(1)
+                    
+                    hist, ov, cf, bs = get_alpha_data(t, key)
+                    pe_hist = get_historical_pe(t, key, hist)
+                    if not hist.empty and ov:
+                        s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+                        s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+                        s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+                        s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+                        
+                        curr_price = hist['close'].iloc[-1]
+                        log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+                        
+                        row = {
+                            "Ticker": t, "Date": log_date, "Price": curr_price,
+                            "Rev Growth": raw_metrics.get('Rev Growth'), "Profit Margin": raw_metrics.get('Profit Margin'),
+                            "FCF Yield": raw_metrics.get('FCF Yield'), "ROE": raw_metrics.get('ROE'),
+                            "PEG": raw_metrics.get('PEG'), "Mom Position %": raw_metrics.get('Mom Position'),
+                            "Mom Slope %": raw_metrics.get('Mom Slope'), "RVOL": raw_metrics.get('RVOL'),
+                            "RSI": raw_metrics.get('RSI'), "Insider %": raw_metrics.get('Insider %'),
+                            "Score (Balanced)": s_bal, "Score (Aggressive)": s_agg,
+                            "Score (Defensive)": s_def, "Score (Speculative)": s_spec
+                        }
+                        new_data_buffer.append(row)
+                    
+                    time.sleep(0.8) # Premium Speed (75/min)
                     prog.progress((i+1)/len(tickers))
-                st.success("Done!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
+                
+                # SAVE ONCE
+                if new_data_buffer:
+                    stat.text("Saving to Database...")
+                    batch_save_to_sheet(new_data_buffer)
+                    st.success(f"Added {len(new_data_buffer)} tickers!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
 
     if not st.session_state.watchlist_df.empty and 'Ticker' in st.session_state.watchlist_df.columns:
         unique_tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
@@ -590,11 +627,20 @@ with t1:
             pe_hist = get_historical_pe(tick, key, hist)
         if not hist.empty and ov:
             score, log, raw_metrics, base_scores = calculate_sector_relative_score(ov, cf, bs, hist, active_weights, use_50ma=is_speculative, mode=mode_name, historical_pe_df=pe_hist)
+            
+            # DB Prep
+            s_bal, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+            s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+            s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+            s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+            scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
+            
             curr_price = hist['close'].iloc[-1]
+            day_delta = curr_price - hist['close'].iloc[-2] if len(hist)>1 else 0
             
             st.markdown(f"## {tick} - {ov.get('Name')}")
             k0, k1, k2, k3, k4 = st.columns(5)
-            k0.metric("Price", f"${curr_price:.2f}")
+            k0.metric("Price", f"${curr_price:.2f}", f"{day_delta:+.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
             k2.metric("RSI", f"{raw_metrics.get('RSI', 50):.0f}")
             k3.metric("P/E", f"{safe_float(ov.get('PERatio', 0)):.2f}")
@@ -607,7 +653,7 @@ with t1:
                 st.plotly_chart(plot_score_breakdown(base_scores, mode_name), use_container_width=True)
                 st.dataframe(pd.DataFrame(list(log.items()), columns=["Metric", "Details"]), hide_index=True, use_container_width=True)
                 if st.button("⭐ Log to Cloud Watchlist"):
-                    process_and_log_ticker(tick, key)
+                    add_log_to_sheet(tick, curr_price, raw_metrics, scores_db)
                     st.success(f"Logged {tick}!")
                     st.session_state.watchlist_df = get_watchlist_data()
             with col_chart:
@@ -617,18 +663,48 @@ with t1:
 with t2:
     st.header("Watchlist Portfolio")
     
-    # 1. UPDATE ALL BUTTON (NEW)
+    # 1. UPDATE ALL BUTTON (OPTIMIZED BUFFER)
     if st.button("🔄 Update All Stocks Now"):
         if not key: st.error("Need API Key")
         elif unique_tickers:
             prog = st.progress(0); stat = st.empty()
+            new_data_buffer = [] # COLLECT DATA HERE
+            
             for i, t in enumerate(unique_tickers):
                 stat.text(f"Updating {t} ({i+1}/{len(unique_tickers)})...")
-                process_and_log_ticker(t, key)
-                if not is_premium: time.sleep(12)
-                else: time.sleep(1)
+                
+                # Fetch logic manually to control buffer
+                hist, ov, cf, bs = get_alpha_data(t, key)
+                pe_hist = get_historical_pe(t, key, hist)
+                if not hist.empty and ov:
+                    s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+                    s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+                    s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+                    s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+                    
+                    curr_price = hist['close'].iloc[-1]
+                    log_date = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+                    
+                    row = {
+                        "Ticker": t, "Date": log_date, "Price": curr_price,
+                        "Rev Growth": raw_metrics.get('Rev Growth'), "Profit Margin": raw_metrics.get('Profit Margin'),
+                        "FCF Yield": raw_metrics.get('FCF Yield'), "ROE": raw_metrics.get('ROE'),
+                        "PEG": raw_metrics.get('PEG'), "Mom Position %": raw_metrics.get('Mom Position'),
+                        "Mom Slope %": raw_metrics.get('Mom Slope'), "RVOL": raw_metrics.get('RVOL'),
+                        "RSI": raw_metrics.get('RSI'), "Insider %": raw_metrics.get('Insider %'),
+                        "Score (Balanced)": s_bal, "Score (Aggressive)": s_agg,
+                        "Score (Defensive)": s_def, "Score (Speculative)": s_spec
+                    }
+                    new_data_buffer.append(row)
+                
+                time.sleep(0.8) # Premium Speed
                 prog.progress((i+1)/len(unique_tickers))
-            st.success("All Stocks Updated!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
+            
+            # SAVE ONCE
+            if new_data_buffer:
+                stat.text("Saving update to database...")
+                batch_save_to_sheet(new_data_buffer)
+                st.success("All Stocks Updated!"); st.session_state.watchlist_df = get_watchlist_data(); st.rerun()
 
     # 2. CLEAN DISPLAY LOGIC
     df_wl = st.session_state.watchlist_df
@@ -716,8 +792,7 @@ with t3:
                         sector_data[sec] = hist
                     
                     prog.progress((i + 1) / len(selected_sectors))
-                    if not is_premium:
-                        time.sleep(1)
+                    time.sleep(0.5) # Premium speed
                 
                 status.empty()
                 prog.empty()
