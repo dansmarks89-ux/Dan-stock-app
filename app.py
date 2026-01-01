@@ -137,6 +137,13 @@ def safe_float(val):
         return float(val)
     except: return None
 
+def round_metric(val, decimals=2):
+    """Safely round numeric values"""
+    try:
+        return round(float(val), decimals)
+    except:
+        return None
+
 @st.cache_data(ttl=3600)
 def get_alpha_data(ticker, api_key):
     base = "https://www.alphavantage.co/query"
@@ -736,7 +743,11 @@ with t2:
     st.header("Watchlist")
     
     # 1. UPDATE ALL BUTTON (OPTIMIZED BUFFER)
-    if st.button("🔄 Update All Stocks Now"):
+    if st.button("🔄 Update All Stocks Now", type="primary"):
+        tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
+        est_time = len(tickers) * (0.8 if is_premium else 60)
+    
+        if st.warning(f"⏱️ This will take ~{est_time/60:.1f} minutes. Continue?"):
         if not key: st.error("Need API Key")
         elif not st.session_state.watchlist_df.empty:
             tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
@@ -836,28 +847,356 @@ with t2:
 
 with t3:
     st.header("🌊 Sector Flow Intelligence")
+    
+    # --- CONFIGURATION ---
     col_config = st.columns([2, 2, 1])
     with col_config[0]:
-        selected_sectors = st.multiselect("Select Sectors", list(SECTOR_ETFS.keys())[:-1], default=list(SECTOR_ETFS.keys())[:-1])
-    with c_tf: days = tf_selector("rot")
+        selected_sectors = st.multiselect(
+            "Select Sectors", 
+            list(SECTOR_ETFS.keys())[:-1], 
+            default=list(SECTOR_ETFS.keys())[:-1]
+        )
+    with col_config[1]:
+        timeframes = st.multiselect(
+            "Analysis Periods",
+            ["1 Week", "1 Month", "3 Months", "6 Months", "1 Year"],
+            default=["1 Month", "3 Months", "6 Months"]
+        )
+    with col_config[2]:
+        include_volume = st.checkbox("Volume-Weighted", value=True)
     
-    if st.button("Analyze Sectors"):
-        spy_hist, _, _, _ = get_alpha_data("SPY", key)
-        if not spy_hist.empty:
-            cutoff = spy_hist.index[-1] - timedelta(days=days)
-            spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
-            df_rel = pd.DataFrame()
-            prog = st.progress(0)
-            for i, sec in enumerate(selected_sectors):
-                ticker = SECTOR_ETFS[sec]
-                hist, _, _, _ = get_alpha_data(ticker, key)
-                if not hist.empty:
-                    sec_sub = hist[hist.index >= cutoff]['close']
-                    comb = pd.concat([sec_sub, spy_sub], axis=1).dropna()
-                    rel = comb.iloc[:, 0] / comb.iloc[:, 1]
-                    df_rel[sec] = (rel / rel.iloc[0] - 1) * 100
-                prog.progress((i+1)/len(selected_sectors))
-            st.plotly_chart(px.line(df_rel, title="Sector Relative Performance vs SPY"), use_container_width=True)
+    if st.button("🔄 Analyze Market Rotation", type="primary"):
+        # Timeframe mapping
+        tf_map = {
+            "1 Week": 5, "1 Month": 22, "3 Months": 63,
+            "6 Months": 126, "1 Year": 252
+        }
+        
+        with st.spinner("Fetching sector data..."):
+            # Get SPY baseline
+            spy_hist, _, _, _ = get_alpha_data("SPY", key)
+            
+            if not spy_hist.empty:
+                # --- DATA COLLECTION ---
+                sector_data = {}
+                prog = st.progress(0)
+                status = st.empty()
+                
+                for i, sec in enumerate(selected_sectors):
+                    ticker = SECTOR_ETFS[sec]
+                    status.text(f"Loading {sec}...")
+                    hist, _, _, _ = get_alpha_data(ticker, key)
+                    
+                    if not hist.empty:
+                        sector_data[sec] = hist
+                    
+                    prog.progress((i + 1) / len(selected_sectors))
+                    time.sleep(0.8 if is_premium else 12)
+                
+                status.empty()
+                prog.empty()
+                
+                # --- ANALYSIS TABS ---
+                tab1, tab2, tab3, tab4 = st.tabs([
+                    "📊 Performance Heatmap",
+                    "🎯 Rotation Matrix",
+                    "📈 Relative Strength",
+                    "💹 Momentum Signals"
+                ])
+                
+                # ============================================
+                # TAB 1: MULTI-TIMEFRAME HEATMAP
+                # ============================================
+                with tab1:
+                    st.subheader("Multi-Timeframe Performance vs SPY")
+                    
+                    heatmap_data = []
+                    for sec in selected_sectors:
+                        if sec not in sector_data:
+                            continue
+                        
+                        row_data = {"Sector": sec}
+                        hist = sector_data[sec]
+                        
+                        for tf_name in timeframes:
+                            days = tf_map[tf_name]
+                            
+                            if len(hist) < days:
+                                row_data[tf_name] = None
+                                continue
+                            
+                            # Calculate relative return
+                            sec_start = hist['close'].iloc[-days]
+                            sec_end = hist['close'].iloc[-1]
+                            sec_ret = ((sec_end / sec_start) - 1) * 100
+                            
+                            spy_start = spy_hist['close'].iloc[-days]
+                            spy_end = spy_hist['close'].iloc[-1]
+                            spy_ret = ((spy_end / spy_start) - 1) * 100
+                            
+                            rel_perf = sec_ret - spy_ret
+                            
+                            # Volume-weighted if enabled
+                            if include_volume and 'volume' in hist.columns:
+                                try:
+                                    recent_vol = hist['volume'].iloc[-5:].mean()
+                                    avg_vol = hist['volume'].iloc[-days:].mean()
+                                    vol_factor = recent_vol / avg_vol if avg_vol > 0 else 1
+                                    rel_perf = rel_perf * vol_factor
+                                except:
+                                    pass
+                            
+                            row_data[tf_name] = rel_perf
+                        
+                        heatmap_data.append(row_data)
+                    
+                    df_heatmap = pd.DataFrame(heatmap_data)
+                    
+                    if not df_heatmap.empty:
+                        # Create heatmap
+                        fig_heat = go.Figure(data=go.Heatmap(
+                            z=df_heatmap[timeframes].values,
+                            x=timeframes,
+                            y=df_heatmap['Sector'],
+                            colorscale='RdYlGn',
+                            zmid=0,
+                            text=df_heatmap[timeframes].round(1).values,
+                            texttemplate='%{text}%',
+                            textfont={"size": 10},
+                            colorbar=dict(title="Relative<br>Performance")
+                        ))
+                        
+                        fig_heat.update_layout(
+                            title="Sector Outperformance vs SPY (%)",
+                            height=400,
+                            xaxis_title="Time Period",
+                            yaxis_title="Sector"
+                        )
+                        
+                        st.plotly_chart(fig_heat, use_container_width=True)
+                        
+                        # Rankings
+                        st.markdown("### 📊 Current Rankings")
+                        if "1 Month" in df_heatmap.columns:
+                            ranked = df_heatmap.sort_values("1 Month", ascending=False)
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric(
+                                    "🥇 Top Performer",
+                                    ranked.iloc[0]['Sector'],
+                                    f"+{ranked.iloc[0]['1 Month']:.1f}% vs SPY"
+                                )
+                            with col2:
+                                st.metric(
+                                    "⚖️ Middle Pack",
+                                    ranked.iloc[len(ranked)//2]['Sector'],
+                                    f"{ranked.iloc[len(ranked)//2]['1 Month']:+.1f}% vs SPY"
+                                )
+                            with col3:
+                                st.metric(
+                                    "🥉 Laggard",
+                                    ranked.iloc[-1]['Sector'],
+                                    f"{ranked.iloc[-1]['1 Month']:.1f}% vs SPY"
+                                )
+                
+                # ============================================
+                # TAB 2: ROTATION MATRIX (QUADRANTS)
+                # ============================================
+                with tab2:
+                    st.subheader("Sector Rotation Matrix")
+                    st.caption("Identifies sectors transitioning between leadership phases")
+                    
+                    matrix_data = []
+                    for sec in selected_sectors:
+                        if sec not in sector_data:
+                            continue
+                        
+                        hist = sector_data[sec]
+                        
+                        if len(hist) < 63:
+                            continue
+                        
+                        # X-axis: 3-month momentum TREND (slope)
+                        prices_3m = hist['close'].iloc[-63:]
+                        spy_3m = spy_hist['close'].iloc[-63:]
+                        
+                        rel_ratio = prices_3m / spy_3m
+                        rel_ratio_norm = rel_ratio / rel_ratio.iloc[0]
+                        
+                        # Calculate linear regression slope
+                        x = np.arange(len(rel_ratio_norm))
+                        y = rel_ratio_norm.values
+                        slope = np.polyfit(x, y, 1)[0] * 100  # Trend direction
+                        
+                        # Y-axis: 1-month momentum (recent strength)
+                        sec_ret_1m = ((hist['close'].iloc[-1] / hist['close'].iloc[-22]) - 1) * 100
+                        spy_ret_1m = ((spy_hist['close'].iloc[-1] / spy_hist['close'].iloc[-22]) - 1) * 100
+                        recent_momentum = sec_ret_1m - spy_ret_1m
+                        
+                        matrix_data.append({
+                            "Sector": sec,
+                            "Trend": slope,
+                            "Momentum": recent_momentum
+                        })
+                    
+                    df_matrix = pd.DataFrame(matrix_data)
+                    
+                    if not df_matrix.empty:
+                        # Quadrant classification
+                        def classify_quadrant(row):
+                            if row['Momentum'] > 0 and row['Trend'] > 0:
+                                return "🟢 Leading"
+                            elif row['Momentum'] > 0 and row['Trend'] <= 0:
+                                return "🟡 Improving"
+                            elif row['Momentum'] <= 0 and row['Trend'] > 0:
+                                return "🟠 Weakening"
+                            else:
+                                return "🔴 Lagging"
+                        
+                        df_matrix['Quadrant'] = df_matrix.apply(classify_quadrant, axis=1)
+                        
+                        # Scatter plot
+                        fig_matrix = px.scatter(
+                            df_matrix,
+                            x='Trend',
+                            y='Momentum',
+                            text='Sector',
+                            color='Quadrant',
+                            size=[20]*len(df_matrix),
+                            color_discrete_map={
+                                "🟢 Leading": "#00CC66",
+                                "🟡 Improving": "#FFD700",
+                                "🟠 Weakening": "#FF8C00",
+                                "🔴 Lagging": "#FF4444"
+                            },
+                            title="Sector Rotation Quadrants"
+                        )
+                        
+                        fig_matrix.add_hline(y=0, line_dash="dash", line_color="gray")
+                        fig_matrix.add_vline(x=0, line_dash="dash", line_color="gray")
+                        
+                        fig_matrix.update_traces(textposition='top center')
+                        fig_matrix.update_layout(height=500, showlegend=True)
+                        
+                        st.plotly_chart(fig_matrix, use_container_width=True)
+                        
+                        # Actionable insights
+                        leading = df_matrix[df_matrix['Quadrant'] == "🟢 Leading"]
+                        improving = df_matrix[df_matrix['Quadrant'] == "🟡 Improving"]
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.success("**🎯 BUY SIGNALS (Leading Sectors)**")
+                            if not leading.empty:
+                                for _, row in leading.iterrows():
+                                    st.write(f"• {row['Sector']}")
+                            else:
+                                st.caption("None currently")
+                        
+                        with col2:
+                            st.info("**👀 WATCH (Improving Sectors)**")
+                            if not improving.empty:
+                                for _, row in improving.iterrows():
+                                    st.write(f"• {row['Sector']}")
+                            else:
+                                st.caption("None currently")
+                
+                # ============================================
+                # TAB 3: RELATIVE STRENGTH CHART
+                # ============================================
+                with tab3:
+                    st.subheader("Relative Strength vs SPY (3 Months)")
+                    
+                    df_rel = pd.DataFrame()
+                    cutoff = spy_hist.index[-1] - timedelta(days=63)
+                    spy_sub = spy_hist[spy_hist.index >= cutoff]['close']
+                    
+                    for sec in selected_sectors:
+                        if sec not in sector_data:
+                            continue
+                        
+                        sec_sub = sector_data[sec][sector_data[sec].index >= cutoff]['close']
+                        comb = pd.concat([sec_sub, spy_sub], axis=1).dropna()
+                        
+                        if len(comb) > 0:
+                            rel = comb.iloc[:, 0] / comb.iloc[:, 1]
+                            df_rel[sec] = (rel / rel.iloc[0] - 1) * 100
+                    
+                    if not df_rel.empty:
+                        fig_rel = px.line(
+                            df_rel,
+                            title="Relative Performance vs SPY (%)",
+                            labels={"value": "Relative Return (%)", "index": "Date"}
+                        )
+                        fig_rel.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.5)
+                        fig_rel.update_layout(height=500, hovermode='x unified')
+                        
+                        st.plotly_chart(fig_rel, use_container_width=True)
+                
+                # ============================================
+                # TAB 4: MOMENTUM SIGNALS
+                # ============================================
+                with tab4:
+                    st.subheader("Technical Momentum Signals")
+                    
+                    signal_data = []
+                    for sec in selected_sectors:
+                        if sec not in sector_data:
+                            continue
+                        
+                        hist = sector_data[sec]
+                        
+                        if len(hist) < 200:
+                            continue
+                        
+                        curr_price = hist['close'].iloc[-1]
+                        ma50 = hist['close'].rolling(50).mean().iloc[-1]
+                        ma200 = hist['close'].rolling(200).mean().iloc[-1]
+                        
+                        # RSI
+                        rsi = calculate_rsi(hist['close'])
+                        
+                        # Relative Volume
+                        try:
+                            rvol = hist['volume'].iloc[-5:].mean() / hist['volume'].iloc[-20:].mean()
+                        except:
+                            rvol = 1.0
+                        
+                        # Signal generation
+                        signals = []
+                        if curr_price > ma50 > ma200:
+                            signals.append("🟢 Bullish Trend")
+                        elif curr_price < ma50 < ma200:
+                            signals.append("🔴 Bearish Trend")
+                        
+                        if rsi < 30:
+                            signals.append("⚡ Oversold")
+                        elif rsi > 70:
+                            signals.append("⚠️ Overbought")
+                        
+                        if rvol > 1.5:
+                            signals.append("📢 High Volume")
+                        
+                        signal_data.append({
+                            "Sector": sec,
+                            "Price vs MA50": f"{((curr_price/ma50 - 1)*100):+.1f}%",
+                            "Price vs MA200": f"{((curr_price/ma200 - 1)*100):+.1f}%",
+                            "RSI": f"{rsi:.0f}",
+                            "RVOL": f"{rvol:.2f}",
+                            "Signals": " | ".join(signals) if signals else "Neutral"
+                        })
+                    
+                    df_signals = pd.DataFrame(signal_data)
+                    
+                    if not df_signals.empty:
+                        st.dataframe(
+                            df_signals,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+            else:
+                st.error("Unable to fetch SPY data for baseline comparison")
 
 with t4:
     st.header("🔎 Dynamic Screener")
