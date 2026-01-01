@@ -678,7 +678,10 @@ with t1:
             k0.metric("Price", f"${curr_price:.2f}")
             k1.metric("Market Cap", f"${safe_float(ov.get('MarketCapitalization',0))/1e9:.1f} B")
             k2.metric("RSI", f"{raw_metrics.get('RSI', 50):.0f}")
-            k3.metric("P/E", f"{safe_float(ov.get('PERatio', 0)):.2f}")
+            
+            # Handle None P/E Ratio
+            pe_ratio = safe_float(ov.get('PERatio', 0))
+            k3.metric("P/E", f"{pe_ratio:.2f}" if pe_ratio else "N/A")
             k4.metric("Insider %", f"{raw_metrics.get('Insider %', 0):.1f}%")
             
             col_metrics, col_chart = st.columns([1, 2])
