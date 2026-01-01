@@ -819,7 +819,7 @@ with t4:
     st.header("🔎 Stock Screener")
     st.caption("Filter your existing watchlist to find opportunities.")
     
-    if not df_wl.empty:
+    if not df_wl.empty and 'Ticker' in df_wl.columns:
         c1, c2, c3 = st.columns(3)
         with c1:
             min_score = st.slider("Min Balanced Score", 0, 100, 60)
@@ -829,20 +829,36 @@ with t4:
             max_peg = st.slider("Max PEG Ratio", 0.0, 5.0, 2.0)
             
         # Filter Logic
-        # Get latest
         latest_entries = []
         for t in df_wl['Ticker'].unique():
             latest_entries.append(df_wl[df_wl['Ticker'] == t].sort_values("Date").iloc[-1])
         df_screen = pd.DataFrame(latest_entries)
+        
+        # --- FIX STARTS HERE ---
+        # 1. Ensure missing columns exist (for old data)
+        for col in ['RSI', 'Rev Growth', 'PEG', 'Mom Slope %', 'Signal']:
+            if col not in df_screen.columns:
+                df_screen[col] = 0.0 if col != 'Signal' else "N/A"
+
+        # 2. Calculate Signal on the fly (since it's not in the database)
+        # This prevents the KeyError for 'Signal'
+        df_screen['Signal'] = df_screen.apply(generate_signal, axis=1)
+        # --- FIX ENDS HERE ---
         
         # Apply Masks
         mask = (df_screen['Score (Balanced)'] >= min_score) & \
                (df_screen['Rev Growth'] >= min_growth)
         
         # Handle PEG (some might be None/NaN)
-        mask_peg = (df_screen['PEG'] <= max_peg) | (df_screen['PEG'].isna())
+        mask_peg = (df_screen['PEG'] <= max_peg) | (df_screen['PEG'].isna()) | (df_screen['PEG'] == 0.0)
         
         filtered = df_screen[mask & mask_peg]
         
-        st.success(f"Matches: {len(filtered)}")
-        st.dataframe(filtered[['Ticker', 'Score (Balanced)', 'Rev Growth', 'PEG', 'RSI', 'Signal']], use_container_width=True)
+        if not filtered.empty:
+            st.success(f"Matches: {len(filtered)}")
+            # Now it is safe to select these columns
+            st.dataframe(filtered[['Ticker', 'Score (Balanced)', 'Rev Growth', 'PEG', 'RSI', 'Signal']], use_container_width=True)
+        else:
+            st.info("No stocks match these filters.")
+    else:
+        st.info("Watchlist is empty.")
