@@ -3,3 +3,4 @@ pandas
 requests
 plotly
 st-gsheets-connection
+matplotlib
