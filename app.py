@@ -575,6 +575,61 @@ def generate_signal(row, score_col):
     else: return "🟡 Hold"
 
 # ==========================================
+# 5. UI HELPERS & PLOTTING
+# ==========================================
+def tf_selector(key_suffix):
+    c_tf = st.columns(4)
+    tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
+    choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
+    return tf_map[choice]
+
+def plot_dual_axis(price_df, pe_df, title, days):
+    cutoff = price_df.index[-1] - timedelta(days=days)
+    p_sub = price_df[price_df.index >= cutoff]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=p_sub.index, y=p_sub['close'], name="Price ($)", line=dict(color='#00CC96', width=2)))
+    if not pe_df.empty:
+        pe_sub = pe_df[pe_df.index >= cutoff]
+        if not pe_sub.empty:
+            fig.add_trace(go.Scatter(x=pe_sub.index, y=pe_sub['pe_ratio'], name="P/E Ratio", line=dict(color='#636EFA', width=2, dash='dot'), yaxis="y2"))
+    fig.update_layout(title=title, yaxis=dict(title="Price ($)"), yaxis2=dict(title="P/E Ratio", overlaying="y", side="right"), hovermode="x unified", legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- GLOBAL HELPER: PROCESS TICKER & LOG ---
+def process_and_log_ticker(ticker, api_key):
+    hist, ov, cf, bs = get_alpha_data(ticker, api_key)
+    pe_hist = get_historical_pe(ticker, api_key, hist)
+    if not hist.empty and ov:
+        s_bal, _, raw_metrics, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_BALANCED, use_50ma=False, mode="Balanced", historical_pe_df=pe_hist)
+        s_agg, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_AGGRESSIVE, use_50ma=False, mode="Aggressive", historical_pe_df=pe_hist)
+        s_def, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_DEFENSIVE, use_50ma=False, mode="Defensive", historical_pe_df=pe_hist)
+        s_spec, _, _, _ = calculate_sector_relative_score(ov, cf, bs, hist, WEIGHTS_SPECULATIVE, use_50ma=True, mode="Speculative")
+        scores_db = {'Balanced': s_bal, 'Aggressive': s_agg, 'Defensive': s_def, 'Speculative': s_spec}
+        
+        sector = ov.get('Sector', 'Unknown')
+        mcap = safe_float(ov.get('MarketCapitalization'))
+        
+        success = add_log_to_sheet(ticker, hist['close'].iloc[-1], raw_metrics, scores_db, sector, mcap)
+        return True
+    return False
+
+def plot_score_breakdown(base_scores, mode_name):
+    categories = list(base_scores.keys()); values = [base_scores[k] for k in categories]
+    values_pct = [(v/20)*100 for v in values]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=values_pct, theta=[k.title() for k in categories], fill='toself', name=mode_name))
+    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False, height=300, title=f"{mode_name} DNA")
+    return fig
+
+def generate_signal(row, score_col):
+    score = row.get(score_col, 0); mom_slope = row.get('Mom Slope %', 0); peg = row.get('PEG')
+    if score >= 90 and mom_slope > 5: return "🟢 Strong Buy"
+    elif score >= 80 and (mom_slope > 0 or (peg and peg < 1.5)): return "🟢 Buy"
+    elif score < 40: return "🔴 Sell"
+    elif mom_slope < -10 and (peg and peg > 2.5): return "🔴 Sell"
+    else: return "🟡 Hold"
+
+# ==========================================
 # 6. MAIN APP UI
 # ==========================================
 st.title("🦅 Alpha Pro v22.0 (Strict)")
