@@ -7,6 +7,7 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import time
 import numpy as np
+is_premium = True
 
 # ==========================================
 # 1. CONFIGURATION & CONSTANTS
