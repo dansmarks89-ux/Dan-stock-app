@@ -744,11 +744,11 @@ with t2:
     
     # 1. UPDATE ALL BUTTON (OPTIMIZED BUFFER)
     if st.button("🔄 Update All Stocks Now", type="primary"):
+    if not key: 
+        st.error("Need API Key")
+    elif not st.session_state.watchlist_df.empty:
         tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
-        est_time = len(tickers) * (0.8 if is_premium else 60)
-    
-        if st.warning(f"⏱️ This will take ~{est_time/60:.1f} minutes. Continue?"):
-        if not key: st.error("Need API Key")
+        est_time = len(tickers) * (0.8 if is_premium else 12)
         elif not st.session_state.watchlist_df.empty:
             tickers = st.session_state.watchlist_df['Ticker'].unique().tolist()
             prog = st.progress(0); stat = st.empty()
