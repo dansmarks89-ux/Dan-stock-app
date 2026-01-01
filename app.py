@@ -522,12 +522,6 @@ def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df
 # ==========================================
 # 5. UI HELPERS & PLOTTING
 # ==========================================
-def tf_selector(key_suffix):
-    c_tf = st.columns(4)
-    tf_map = {"1M": 30, "3M": 90, "1Y": 365, "5Y": 1825}
-    choice = st.radio("Range", list(tf_map.keys()), index=2, horizontal=True, key=f"tf_{key_suffix}")
-    return tf_map[choice]
-
 def plot_dual_axis(price_df, pe_df, title, days):
     cutoff = price_df.index[-1] - timedelta(days=days)
     p_sub = price_df[price_df.index >= cutoff]
