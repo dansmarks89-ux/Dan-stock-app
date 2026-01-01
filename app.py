@@ -640,7 +640,7 @@ with st.sidebar:
                             "Ticker": t, "Date": log_date, "Sector": sector, "Price": r2(curr_price), "Market Cap": r2(mcap),
                             "Rev Growth": r2(raw_metrics.get('Rev Growth')), "Profit Margin": r2(raw_metrics.get('Profit Margin')),
                             "FCF Yield": r2(raw_metrics.get('FCF Yield')), "ROE": r2(raw_metrics.get('ROE')),
-                            "PEG": r2(raw_metrics.get('PEG')), "Mom Position %": r2(raw_metrics.get('Mom Position')),
+            "PEG": r2(raw_metrics.get('PEG')), "Mom Position %": r2(raw_metrics.get('Mom Position')),
                             "Mom Slope %": r2(raw_metrics.get('Mom Slope')), "RVOL": r2(raw_metrics.get('RVOL')),
                             "RSI": r2(raw_metrics.get('RSI')), "Insider %": r2(raw_metrics.get('Insider %')),
                             "Score (Balanced)": s_bal, "Score (Aggressive)": s_agg,
@@ -777,7 +777,7 @@ with t2:
             else:
                 st.error("No data retrieved")
 
-    # 2. DISPLAY LOGIC
+    # 2. DISPLAY LOGIC WITH TOP PICKS
     if not df_wl.empty and 'Ticker' in df_wl.columns:
         # User Selection
         view_mode = st.radio(
@@ -812,14 +812,77 @@ with t2:
             lambda row: generate_signal(row, score_col), axis=1
         )
         
+        # ============================================
+        # TOP PICKS IDENTIFICATION (Score > 80)
+        # ============================================
+        def get_top_2_picks(df, score_column, secondary_metric, category_name):
+            """Get top 2 stocks with score > 80 based on secondary metric"""
+            qualified = df[df[score_column] > 80].copy()
+            
+            if len(qualified) == 0:
+                return []
+            
+            # Handle missing values in secondary metric
+            qualified = qualified.dropna(subset=[secondary_metric])
+            
+            if len(qualified) == 0:
+                return []
+            
+            # For metrics where LOWER is better (PEG)
+            if secondary_metric in ['PEG']:
+                top_picks = qualified.nsmallest(2, secondary_metric)
+            else:
+                # For metrics where HIGHER is better
+                top_picks = qualified.nlargest(2, secondary_metric)
+            
+            return top_picks['Ticker'].tolist()
+        
+        # Identify top picks for EACH strategy
+        balanced_tops = get_top_2_picks(
+            df_latest, 
+            'Score (Balanced)', 
+            'FCF Yield',  # Best metric for balanced (cash generation)
+            'Balanced'
+        )
+        
+        aggressive_tops = get_top_2_picks(
+            df_latest, 
+            'Score (Aggressive)', 
+            'Rev Growth',  # Best metric for growth
+            'Aggressive'
+        )
+        
+        defensive_tops = get_top_2_picks(
+            df_latest, 
+            'Score (Defensive)', 
+            'PEG',  # Best metric for value (lower is better)
+            'Defensive'
+        )
+        
         # Rename for display
         df_latest = df_latest.rename(columns={score_col: "Score"})
         
-        # Display
+        # Display with highlighting
         display_cols = ['Ticker', 'Signal', 'Score']
         
+        def highlight_top_picks(row):
+            """Apply color highlighting to top picks"""
+            ticker = row['Ticker']
+            
+            # Category-specific colors
+            if ticker in balanced_tops:
+                return ['background-color: #90EE90; font-weight: bold'] * len(row)  # Light green
+            elif ticker in aggressive_tops:
+                return ['background-color: #87CEEB; font-weight: bold'] * len(row)  # Light blue
+            elif ticker in defensive_tops:
+                return ['background-color: #FFD700; font-weight: bold'] * len(row)  # Gold
+            else:
+                return [''] * len(row)
+        
         st.dataframe(
-            df_latest[display_cols].sort_values("Score", ascending=False).style.applymap(
+            df_latest[display_cols].sort_values("Score", ascending=False).style.apply(
+                highlight_top_picks, axis=1
+            ).applymap(
                 lambda x: "background-color: #d4edda; color: black" if "Buy" in str(x) 
                 else ("background-color: #f8d7da; color: black" if "Sell" in str(x) else ""), 
                 subset=['Signal']
@@ -827,6 +890,49 @@ with t2:
             use_container_width=True, 
             hide_index=True
         )
+        
+        # Legend for top picks
+        st.markdown("""
+        **🌟 TOP PICKS (Score > 80):**
+        - 🟢 **Green** = Top 2 Balanced Stocks (Best FCF Yield)
+        - 🔵 **Blue** = Top 2 Growth Stocks (Best Revenue Growth)
+        - 🟡 **Gold** = Top 2 Value Stocks (Best PEG Ratio)
+        """)
+        
+        # Show top picks summary
+        if balanced_tops or aggressive_tops or defensive_tops:
+            st.divider()
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.success("**🟢 Balanced Leaders**")
+                if balanced_tops:
+                    for ticker in balanced_tops:
+                        row = df_latest[df_latest['Ticker'] == ticker].iloc[0]
+                        fcf = row.get('FCF Yield', 0)
+                        st.write(f"• **{ticker}** (FCF: {fcf:.1f}%)")
+                else:
+                    st.caption("None qualify (Score > 80)")
+            
+            with col2:
+                st.info("**🔵 Growth Leaders**")
+                if aggressive_tops:
+                    for ticker in aggressive_tops:
+                        row = df_latest[df_latest['Ticker'] == ticker].iloc[0]
+                        growth = row.get('Rev Growth', 0)
+                        st.write(f"• **{ticker}** (Growth: {growth:.1f}%)")
+                else:
+                    st.caption("None qualify (Score > 80)")
+            
+            with col3:
+                st.warning("**🟡 Value Leaders**")
+                if defensive_tops:
+                    for ticker in defensive_tops:
+                        row = df_latest[df_latest['Ticker'] == ticker].iloc[0]
+                        peg = row.get('PEG', 0)
+                        st.write(f"• **{ticker}** (PEG: {peg:.2f})")
+                else:
+                    st.caption("None qualify (Score > 80)")
         
         # 3. INDIVIDUAL TRENDS
         st.divider()
