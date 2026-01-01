@@ -755,16 +755,18 @@ with t2:
             # Generate Signals
             df_latest['Signal'] = df_latest.apply(generate_signal, axis=1)
             
-            # Display Table with signals
+            # --- FIX STARTS HERE: SAFETY CHECK ---
+            # Define the columns we want to show
             display_cols = ['Ticker', 'Price', 'Score (Balanced)', 'Signal', 'RSI', 'Mom Slope %']
+            
+            # Ensure all columns exist; if missing (old data), fill with 0 or None
+            for col in display_cols:
+                if col not in df_latest.columns:
+                    df_latest[col] = 0.0
+            # --- FIX ENDS HERE ---
+
+            # Display Table with signals
             st.dataframe(df_latest[display_cols].style.applymap(lambda x: "background-color: #d4edda" if "Buy" in str(x) else ("background-color: #f8d7da" if "Sell" in str(x) else ""), subset=['Signal']), use_container_width=True)
-
-        with col_pie:
-            st.subheader("Allocation")
-            fig_alloc = px.pie(df_latest, values='Score (Balanced)', names='Ticker', title='Suggested Weight (by Score)')
-            st.plotly_chart(fig_alloc, use_container_width=True)
-
-        st.divider()
         
         # 3. INDIVIDUAL TRENDS
         tickers = st.multiselect("View History For:", df_latest['Ticker'].unique())
