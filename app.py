@@ -188,52 +188,6 @@ def get_historical_pe(ticker, api_key, price_df):
 # ==========================================
 # 4. SCORING ENGINE (V20.0 - ULTIMATE)
 # ==========================================
-def get_points(val, best, worst, max_pts, high_is_good=False):
-    if val is None: return 0
-    if high_is_good:
-        if val >= best: return max_pts
-        if val <= worst: return 0
-        return round(((val - worst)/(best - worst)) * max_pts, 1)
-    else:
-        if val <= best: return max_pts
-        if val >= worst: return 0
-        return round(((worst - val)/(worst - best)) * max_pts, 1)
-
-# --- NEW HELPER: ADVANCED INCOME METRICS ---
-def get_advanced_income_metrics(cash_flow_data, mcap_int):
-    metrics = {"payout_ratio": None, "shareholder_yield": None}
-    try:
-        reports = cash_flow_data.get('annualReports', [])
-        if len(reports) >= 1:
-            latest = reports[0]
-            # 1. Shareholder Yield (Divs + Buybacks)
-            divs_paid = safe_float(latest.get('dividendPayout')) or 0
-            buybacks = abs(safe_float(latest.get('paymentsForRepurchaseOfCommonStock')) or 0)
-            if mcap_int and mcap_int > 0:
-                metrics["shareholder_yield"] = ((divs_paid + buybacks) / mcap_int) * 100
-            # 2. Payout Ratio (Divs / Net Income)
-            net_income = safe_float(latest.get('netIncome'))
-            if net_income and net_income > 0:
-                metrics["payout_ratio"] = (divs_paid / net_income) * 100
-    except: pass
-    return metrics
-
-# Add after WEIGHTS definitions in Configuration section
-SECTOR_BENCHMARKS = {
-    "Technology": {"margin_median": 20, "growth_median": 15, "pe_median": 25, "fcf_yield_median": 3.5, "roe_median": 18},
-    "Healthcare": {"margin_median": 15, "growth_median": 8, "pe_median": 22, "fcf_yield_median": 4.0, "roe_median": 15},
-    "Financials": {"margin_median": 25, "growth_median": 6, "pe_median": 12, "fcf_yield_median": 5.0, "roe_median": 12},
-    "Energy": {"margin_median": 8, "growth_median": 5, "pe_median": 10, "fcf_yield_median": 6.0, "roe_median": 10},
-    "Consumer Cyclical": {"margin_median": 8, "growth_median": 10, "pe_median": 18, "fcf_yield_median": 4.0, "roe_median": 14},
-    "Consumer Defensive": {"margin_median": 6, "growth_median": 4, "pe_median": 20, "fcf_yield_median": 4.5, "roe_median": 18},
-    "Industrials": {"margin_median": 10, "growth_median": 7, "pe_median": 18, "fcf_yield_median": 4.0, "roe_median": 13},
-    "Utilities": {"margin_median": 12, "growth_median": 2, "pe_median": 16, "fcf_yield_median": 5.5, "roe_median": 9},
-    "Real Estate": {"margin_median": 25, "growth_median": 3, "pe_median": 30, "fcf_yield_median": 4.0, "roe_median": 8},
-    "Communication Services": {"margin_median": 18, "growth_median": 8, "pe_median": 20, "fcf_yield_median": 4.0, "roe_median": 15},
-    "Materials": {"margin_median": 10, "growth_median": 5, "pe_median": 15, "fcf_yield_median": 5.0, "roe_median": 12},
-    "Default": {"margin_median": 12, "growth_median": 8, "pe_median": 18, "fcf_yield_median": 4.0, "roe_median": 14}
-}
-
 def get_sector_context(overview):
     """Extract sector and return benchmarks"""
     sector = overview.get('Sector', 'Default')
@@ -253,6 +207,406 @@ def get_sector_context(overview):
     }
     normalized = sector_map.get(sector.upper(), "Default")
     return normalized, SECTOR_BENCHMARKS.get(normalized, SECTOR_BENCHMARKS["Default"])
+def get_points(val, best, worst, max_pts, high_is_good=False):
+    if val is None: return 0
+    if high_is_good:
+        if val >= best: return max_pts
+        if val <= worst: return 0
+        return round(((val - worst)/(best - worst)) * max_pts, 1)
+    else:
+        if val <= best: return max_pts
+        if val >= worst: return 0
+        return round(((worst - val)/(worst - best)) * max_pts, 1)
+
+def calculate_sector_relative_score(overview, cash_flow, balance_sheet, price_df, weights, use_50ma=False, mode="Balanced", historical_pe_df=None):
+    earned, possible = 0, 0
+    log = {}
+    raw_metrics = {}
+    base_scores = {} 
+    
+    # Get sector context
+    sector_name, sector_bench = get_sector_context(overview)
+    log["Sector"] = sector_name
+    
+    def process_metric(label, raw_val, weight_key, base_score):
+        nonlocal earned, possible
+        base_scores[weight_key] = base_score
+        w = weights.get(weight_key, 0)
+        if raw_val is not None:
+            weighted_points = (base_score / 20) * w
+            earned += weighted_points
+            possible += w
+            return f"{raw_val} ({weighted_points:.1f}/{w})"
+        else:
+            earned += 0
+            possible += w
+            return f"N/A (0.0/{w})"
+            
+    # --- HELPER: GET FCF (Annual with Quarterly Fallback) ---
+    def get_fcf_ttm(cash_flow_data):
+        try:
+            reports = cash_flow_data.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                ocf = safe_float(latest.get('operatingCashflow'))
+                capex = safe_float(latest.get('capitalExpenditures'))
+                if ocf is not None and capex is not None: return ocf - capex
+        except: pass
+        try:
+            q_reports = cash_flow_data.get('quarterlyReports', [])
+            if len(q_reports) >= 4:
+                ttm_ocf = 0
+                ttm_capex = 0
+                for i in range(4):
+                    ttm_ocf += safe_float(q_reports[i].get('operatingCashflow')) or 0
+                    ttm_capex += safe_float(q_reports[i].get('capitalExpenditures')) or 0
+                return ttm_ocf - ttm_capex
+        except: pass
+        return None
+
+    # --- 1. GROWTH ---
+    rev_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+    raw_metrics['Rev Growth'] = rev_growth * 100 if rev_growth else None
+
+    if mode == "Defensive":
+        beta = safe_float(overview.get('Beta'))
+        if beta:
+            base_pts = get_points(beta, 0.8, 1.3, 20, False)
+            log["Volatility (Beta)"] = process_metric("Beta", f"{beta:.2f}", 'growth', base_pts)
+        else:
+            log["Volatility (Beta)"] = process_metric("Beta", "N/A", 'growth', 0)
+            
+    elif mode == "Balanced":
+        eps_growth = safe_float(overview.get('QuarterlyEarningsGrowthYOY'))
+        rev_score = get_points(rev_growth * 100, 20, 0, 20, True) if rev_growth else 0
+        eps_score = get_points(eps_growth * 100, 20, 0, 20, True) if eps_growth else 0
+        avg_score = (rev_score + eps_score) / 2
+        val_str = f"Rev: {rev_growth*100:.1f}% / EPS: {eps_growth*100:.1f}%" if eps_growth else f"Rev: {rev_growth*100:.1f}%"
+        log["Growth (Top+Bottom)"] = process_metric("Growth Blend", val_str, 'growth', avg_score)
+        
+    else:
+        target_growth = 30 if mode == "Aggressive" else 20
+        base_pts = get_points(rev_growth * 100, target_growth, 0, 20, True) if rev_growth else 0
+        log["Revenue Growth"] = process_metric("Rev Growth", f"{rev_growth*100:.1f}%" if rev_growth else None, 'growth', base_pts)
+
+    # --- 2. PROFITABILITY ---
+    margin = safe_float(overview.get('ProfitMargin'))
+    raw_metrics['Profit Margin'] = margin * 100 if margin else None
+
+    fcf_val = get_fcf_ttm(cash_flow)
+    mcap = safe_float(overview.get('MarketCapitalization'))
+    fcf_yield = None
+    if fcf_val is not None and mcap and mcap > 0:
+        fcf_yield = (fcf_val / mcap) * 100
+    
+    raw_metrics['FCF Yield'] = fcf_yield 
+
+    if mode == "Defensive":
+        # ADVANCED INCOME METRICS (Shareholder Yield + Payout Safety)
+        adv_metrics = get_advanced_income_metrics(cash_flow, mcap)
+        
+        div_yield = safe_float(overview.get('DividendYield'))
+        div_yield = div_yield * 100 if div_yield else 0
+        
+        # Shareholder Yield
+        shareholder_yield = adv_metrics.get("shareholder_yield")
+        sy_score = get_points(shareholder_yield, 5.0, 0.0, 20, True) if shareholder_yield else 0
+        
+        # Payout Penalty
+        payout = adv_metrics.get("payout_ratio")
+        safety_penalty = 1.0
+        if payout and payout > 90:
+            safety_penalty = 0.5
+            log["Safety Warning"] = f"Payout Ratio {payout:.0f}% (>90%)"
+            
+        fcf_score = get_points(fcf_yield, 6.0, 0.0, 20, True) if fcf_yield is not None else 0
+        div_score = get_points(div_yield, 3.5, 0.5, 20, True)
+        
+        # Max Logic
+        best_income_score = max(fcf_score, div_score, sy_score) * safety_penalty
+        
+        # Log Logic
+        if shareholder_yield and shareholder_yield > div_yield + 1:
+             msg = f"Yld: {div_yield:.1f}% | Total: {shareholder_yield:.1f}% (Buybacks!)"
+        else:
+             fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
+             msg = f"Yld: {div_yield:.1f}% / FCF: {fcf_str}"
+             
+        log["Income (Smart)"] = process_metric("Total Yield", msg, 'profitability', best_income_score)
+    
+    elif mode == "Balanced":
+        fcf_score = get_points(fcf_yield, 5.0, 1.0, 20, True) if fcf_yield is not None else 0
+        margin_score = get_points(margin * 100, 25, 5, 20, True) if margin else 0
+        avg_prof = (margin_score * 0.3) + (fcf_score * 0.7)
+        fcf_str = f"{fcf_yield:.1f}%" if fcf_yield is not None else "N/A"
+        val_str = f"N.Marg: {margin*100:.1f}% / FCF: {fcf_str}"
+        log["Profit (Cash Heavy)"] = process_metric("Profit Blend", val_str, 'profitability', avg_prof)
+        
+    elif mode == "Aggressive":
+        r_growth = safe_float(overview.get('QuarterlyRevenueGrowthYOY'))
+        r_growth = r_growth * 100 if r_growth else 0
+        fcf_margin = 0
+        rev_annual = safe_float(overview.get('RevenueTTM')) 
+        if fcf_val is not None and rev_annual and rev_annual > 0:
+            fcf_margin = (fcf_val / rev_annual) * 100
+        else:
+            try:
+                net_income = safe_float(cash_flow.get('annualReports', [])[0].get('netIncome'))
+                if net_income and rev_annual: fcf_margin = (net_income / rev_annual) * 100
+            except: pass
+        rule_40 = r_growth + fcf_margin
+        base_rule_pts = get_points(rule_40, 40.0, 0.0, 20, True)
+        raw_metrics['Profit Margin'] = fcf_margin 
+        log["Rule of 40"] = process_metric("Rev+FCF%", f"{rule_40:.1f} (Gr:{r_growth:.1f}+M:{fcf_margin:.1f})", 'profitability', base_rule_pts)
+
+    else:
+        base_margin = get_points(margin * 100, 25, 5, 20, True) if margin else 0
+        log["Profitability"] = process_metric("Net Margin", f"{margin*100:.1f}%" if margin else None, 'profitability', base_margin)
+
+    # --- 3. QUALITY / ROE ---
+    roe = safe_float(overview.get('ReturnOnEquityTTM'))
+    if roe and roe < 5: roe = roe * 100 
+    raw_metrics['ROE'] = roe
+    
+    if mode == "Defensive":
+        de_ratio = None
+        base_solvency = 0
+        try:
+            reports = balance_sheet.get('annualReports', [])
+            if reports:
+                latest = reports[0]
+                equity = safe_float(latest.get('totalShareholderEquity'))
+                short_debt = safe_float(latest.get('shortTermDebt')) or 0
+                long_debt = safe_float(latest.get('longTermDebt')) or 0
+                total_financial_debt = short_debt + long_debt
+                if total_financial_debt > 0 and equity and equity > 0:
+                    de_ratio = total_financial_debt / equity
+                else:
+                    liab = safe_float(latest.get('totalLiabilities'))
+                    if liab and equity and equity > 0:
+                        de_ratio = liab / equity
+                if de_ratio is not None:
+                    base_solvency = get_points(de_ratio, 0.5, 3.0, 20, False)
+        except: pass
+        log["Solvency (Debt)"] = process_metric("Debt/Eq", f"{de_ratio:.2f}" if de_ratio else None, 'roe', base_solvency)
+
+    elif mode == "Balanced":
+        roa = safe_float(overview.get('ReturnOnAssetsTTM'))
+        roa = roa * 100 if roa else 0
+        roa_score = get_points(roa, 10.0, 2.0, 20, True)
+        log["Quality (ROA)"] = process_metric("ROA", f"{roa:.1f}% (ROE: {roe:.1f}%)", 'roe', roa_score)
+
+    else:
+        base_pts = get_points(roe, 25, 5, 20, True) if roe else 0
+        log["ROE"] = process_metric("ROE", f"{roe:.1f}%" if roe else None, 'roe', base_pts)
+
+    # --- 4. VALUE ---
+    val_label = "PEG"
+    val_raw = None
+    base_val_pts = 0
+
+    if mode == "Defensive":
+        val_label = "Hybrid Val"
+        rel_score = 0
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        rel_str = "N/A"
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            if not recent_pe.empty:
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+                avg_pe = max(avg_pe, 15.0) 
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+            rel_str = f"Disc: {pe_discount:+.0f}%"
+        abs_score = 0
+        ev_ebitda = safe_float(overview.get('EVToEBITDA'))
+        abs_str = "N/A"
+        if ev_ebitda:
+            abs_score = get_points(ev_ebitda, 8.0, 20.0, 20, False)
+            abs_str = f"{ev_ebitda:.1f}x EBITDA"
+            val_raw = ev_ebitda 
+        if current_pe and ev_ebitda:
+            base_val_pts = (rel_score + abs_score) / 2
+            val_str = f"{rel_str} | {abs_str}"
+        elif ev_ebitda:
+            base_val_pts = abs_score
+            val_str = f"{abs_str} (Abs Only)"
+        else:
+            base_val_pts = 0
+            val_str = "Data Missing"
+        raw_metrics['PEG'] = val_raw
+        log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
+        
+    elif mode == "Aggressive":
+        val_label = "Hybrid Growth"
+        rel_pe_score = 0
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        rel_str = "N/A"
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            if not recent_pe.empty:
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            rel_pe_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+            rel_str = f"PE Disc: {pe_discount:+.0f}%"
+        ev_sales = safe_float(overview.get('EVToRevenue'))
+        ev_score = 0
+        ev_str = "N/A"
+        if ev_sales:
+            ev_score = get_points(ev_sales, 5.0, 15.0, 20, False)
+            ev_str = f"{ev_sales:.1f}x Sales"
+        if current_pe and avg_pe and ev_sales:
+            base_val_pts = (rel_pe_score * 0.33) + (ev_score * 0.67)
+            val_str = f"{rel_str} | {ev_str}"
+            val_raw = ev_sales
+        elif ev_sales:
+            base_val_pts = ev_score
+            val_str = f"{ev_str} (Sales Only)"
+            val_raw = ev_sales
+        else:
+            base_val_pts = 0
+            val_str = "Data Missing"
+        raw_metrics['PEG'] = val_raw 
+        log["Valuation"] = process_metric(val_label, val_str, 'value', base_val_pts)
+    
+    elif mode == "Balanced":
+        val_label = "Hybrid PEG"
+        peg = safe_float(overview.get('PEGRatio'))
+        peg_score = get_points(peg, 1.0, 2.5, 20, False) if peg else 0
+        rel_score = 0
+        current_pe = safe_float(overview.get('PERatio'))
+        avg_pe = None
+        pe_discount = None 
+        if historical_pe_df is not None and not historical_pe_df.empty:
+            cutoff_date = historical_pe_df.index[-1] - timedelta(days=1825)
+            recent_pe = historical_pe_df[historical_pe_df.index >= cutoff_date]['pe_ratio']
+            if not recent_pe.empty:
+                q_low = recent_pe.quantile(0.10)
+                q_high = recent_pe.quantile(0.90)
+                trimmed_pe = recent_pe[(recent_pe >= q_low) & (recent_pe <= q_high)]
+                if not trimmed_pe.empty: avg_pe = trimmed_pe.mean()
+                else: avg_pe = recent_pe.mean()
+        if current_pe and avg_pe:
+            pe_discount = ((avg_pe - current_pe) / avg_pe) * 100
+            rel_score = get_points(pe_discount, 5.0, -50.0, 20, True)
+        
+        avg_val_pts = (peg_score + rel_score) / 2
+        
+        if peg is not None: peg_str = f"{peg:.2f}"
+        else: peg_str = "N/A"
+        if peg and current_pe and avg_pe and pe_discount is not None:
+            val_str = f"PEG: {peg_str} | Disc: {pe_discount:+.0f}%"
+        else:
+            val_str = f"PEG: {peg_str}"
+        raw_metrics['PEG'] = peg
+        log["Valuation (PEG+Rel)"] = process_metric(val_label, val_str, 'value', avg_val_pts)
+
+    else:
+        val_label = "PEG"
+        val_raw = safe_float(overview.get('PEGRatio'))
+        base_val_pts = get_points(val_raw, 1.0, 2.5, 20, False) if val_raw else 0
+        raw_metrics['PEG'] = val_raw 
+        log["Valuation"] = process_metric(val_label, f"{val_raw:.2f}" if val_raw else None, 'value', base_val_pts)
+
+    # --- 5. MOMENTUM ---
+    pct_diff, slope_pct, rvol = None, None, None
+    base_pts = 0
+    ma_window = 50 if use_50ma else 200
+    slope_lookback = 22 if use_50ma else 63
+    required_history = ma_window + slope_lookback + 5
+    val_str = "N/A"
+    
+    if mode == "Defensive":
+        pass 
+    
+    if not price_df.empty and len(price_df) > required_history:
+        curr_price = price_df['close'].iloc[-1]
+        ma_now = price_df['close'].rolling(window=ma_window).mean().iloc[-1]
+        pos_score = 0
+        if pd.notna(ma_now):
+            pct_diff = ((curr_price / ma_now) - 1) * 100
+            if pct_diff < 0: pos_score = 0
+            elif 0 <= pct_diff <= 25: pos_score = 10
+            else: 
+                penalty = (pct_diff - 25) * 0.5
+                pos_score = max(5, 10 - penalty)
+        
+        ma_old = price_df['close'].rolling(window=ma_window).mean().iloc[-slope_lookback]
+        slope_score = 0
+        if pd.notna(ma_old) and ma_old > 0:
+            slope_pct = ((ma_now - ma_old) / ma_old) * 100
+            target_slope = 10 if use_50ma else 5
+            slope_score = min(10, (slope_pct / target_slope) * 10) if slope_pct > 0 else 0
+        
+        try:
+            vol_5 = price_df['volume'].iloc[-5:].mean()
+            vol_20 = price_df['volume'].iloc[-20:].mean()
+            rvol = vol_5 / vol_20 if vol_20 > 0 else 1.0
+        except: rvol = 1.0
+
+        base_pts = pos_score + slope_score
+        rvol_msg = ""
+        if rvol > 1.2 and slope_pct > 0: 
+            base_pts = min(20, base_pts + 2) 
+            rvol_msg = " + Vol Bonus"
+        elif rvol < 0.6 and slope_pct > 0:
+            base_pts = max(0, base_pts - 2)
+            rvol_msg = " - Low Vol"
+
+        val_str = f"Pos: {pct_diff:+.1f}% / Slope: {slope_pct:+.1f}% / RVOL: {rvol:.2f}{rvol_msg}"
+    else: val_str = None
+    
+    raw_metrics['Mom Position'] = pct_diff
+    raw_metrics['Mom Slope'] = slope_pct
+    raw_metrics['RVOL'] = rvol
+    
+    ma_label = "50-Day" if use_50ma else "200-Day"
+    log[f"Trend ({ma_label})"] = process_metric("Momentum", val_str, 'momentum', base_pts)
+
+    # 6. DEFENSIVE PENALTY
+    if mode == "Defensive":
+        mcap = safe_float(overview.get('MarketCapitalization'))
+        if mcap and mcap < 2e9:
+            score = int((earned/possible)*100) if possible > 0 else 0
+            score = int(score * 0.50)
+            log["Stability Check"] = "Small Cap (Penalty: -50%)"
+            return score, log, raw_metrics, base_scores
+
+    score = int((earned/possible)*100) if possible > 0 else 0
+    return score, log, raw_metrics, base_scores
+
+# --- NEW HELPER: ADVANCED INCOME METRICS ---
+def get_advanced_income_metrics(cash_flow_data, mcap_int):
+    metrics = {"payout_ratio": None, "shareholder_yield": None}
+    try:
+        reports = cash_flow_data.get('annualReports', [])
+        if len(reports) >= 1:
+            latest = reports[0]
+            # 1. Shareholder Yield (Divs + Buybacks)
+            divs_paid = safe_float(latest.get('dividendPayout')) or 0
+            buybacks = abs(safe_float(latest.get('paymentsForRepurchaseOfCommonStock')) or 0)
+            if mcap_int and mcap_int > 0:
+                metrics["shareholder_yield"] = ((divs_paid + buybacks) / mcap_int) * 100
+            # 2. Payout Ratio (Divs / Net Income)
+            net_income = safe_float(latest.get('netIncome'))
+            if net_income and net_income > 0:
+                metrics["payout_ratio"] = (divs_paid / net_income) * 100
+    except: pass
+    return metrics
 
 # ==========================================
 # 5. UI HELPERS & PLOTTING
